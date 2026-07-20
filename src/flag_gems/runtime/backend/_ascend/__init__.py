@@ -33,6 +33,9 @@ CUSTOMIZED_UNUSED_OPS = (
     "sort",
     "sort_stable",
     "topk",
+    # The native kernel avoids Python registration overhead on the default path.
+    # Explicit use_gems(include=[...]) still registers and tests our implementation.
+    "log_sigmoid_backward",
 )
 
 

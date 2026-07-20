@@ -4486,6 +4486,18 @@ ops:
       - NeuralNetwork
     stages:
       - stable: '2.2'
+  - id: log_sigmoid_backward
+    description: Computes the input gradient of the Logsigmoid function.
+    for:
+      - log_sigmoid_backward
+      - log_sigmoid_backward.grad_input
+    labels:
+      - aten
+      - pointwise
+    kind:
+      - NeuralNetwork
+    stages:
+      - alpha: '5.4'
   - id: log_softmax
     description: An internal IR for applying a softmax followed by a logarithm.
     for:

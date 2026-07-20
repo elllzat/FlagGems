@@ -93,6 +93,13 @@ std::tuple<at::Tensor, at::Tensor> topk(
 at::Tensor contiguous(const at::Tensor &self, at::MemoryFormat memory_format = c10::MemoryFormat::Contiguous);
 at::Tensor cat(const at::TensorList &tensors, int64_t dim = 0);
 at::Tensor bmm(const at::Tensor &A, const at::Tensor &B);
+at::Tensor log_sigmoid_backward(const at::Tensor &grad_output,
+                                const at::Tensor &self,
+                                const at::Tensor &buffer);
+at::Tensor &log_sigmoid_backward_out(const at::Tensor &grad_output,
+                                     const at::Tensor &self,
+                                     const at::Tensor &buffer,
+                                     at::Tensor &grad_input);
 at::Tensor embedding(const at::Tensor &weight,
                      const at::Tensor &indices,
                      int64_t padding_idx = -1,

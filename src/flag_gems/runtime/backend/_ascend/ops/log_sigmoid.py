@@ -8,12 +8,6 @@ from flag_gems.utils import pointwise_dynamic
 logger = logging.getLogger(__name__)
 
 
-@pointwise_dynamic(is_tensor=[True], promotion_methods=[(0, "DEFAULT")])
-@triton.jit
-def log_sigmoid_forward(x):
-    return tl.minimum(x, 0.0) - tl.log(1.0 + tl.exp(-tl.abs(x).to(tl.float32)))
-
-
 @pointwise_dynamic(is_tensor=[True, True], promotion_methods=[(0, 1, "DEFAULT")])
 @triton.jit
 def log_sigmoid_backward_kernel(grad_output, self):
@@ -23,24 +17,17 @@ def log_sigmoid_backward_kernel(grad_output, self):
     return grad_output * derivative
 
 
-def log_sigmoid(x):
-    logger.debug("GEMS LOG_SIGMOID FORWARD")
-
-    return log_sigmoid_forward(x)
-
-
 def log_sigmoid_backward(grad_output, self, buffer):
-    logger.debug("GEMS LOG_SIGMOID BACKWARD")
+    logger.debug("GEMS_ASCEND LOG_SIGMOID BACKWARD")
 
-    # PyTorch's CUDA implementation intentionally ignores the forward buffer.
-    # CUDA log_sigmoid_forward returns an empty buffer, so recomputing z here is
-    # required for both the direct ATen operator and autograd integration.
+    # The device forward path may return an empty buffer, as CUDA does.  The
+    # stable recomputation keeps the operator independent of buffer storage.
     del buffer
     return log_sigmoid_backward_kernel(grad_output, self)
 
 
 def log_sigmoid_backward_out(grad_output, self, buffer, *, grad_input):
-    logger.debug("GEMS LOG_SIGMOID BACKWARD OUT")
+    logger.debug("GEMS_ASCEND LOG_SIGMOID BACKWARD OUT")
 
     del buffer
     return log_sigmoid_backward_kernel(grad_output, self, out0=grad_input)
