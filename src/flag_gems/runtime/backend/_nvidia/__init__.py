@@ -29,8 +29,6 @@ Example:
     CUSTOMIZED_UNUSED_OPS = ("add", "cos")
 """
 
-# Keep the vendor kernel on the default path: wrapping this already optimized
-# backward op in a Python registration adds more launch overhead than it saves.
-CUSTOMIZED_UNUSED_OPS = ("log_sigmoid_backward",)
+CUSTOMIZED_UNUSED_OPS = ()
 
 __all__ = ["*"]

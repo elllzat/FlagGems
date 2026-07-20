@@ -3,7 +3,32 @@ from typing import Generator
 import pytest
 import torch
 
+import flag_gems
+
 from . import base, consts
+
+
+def _has_native_ascend_kernel() -> bool:
+    if flag_gems.vendor_name != "ascend":
+        return True
+    try:
+        return torch._C._dispatch_has_kernel_for_dispatch_key(
+            "aten::log_sigmoid_backward", "PrivateUse1"
+        )
+    except (AttributeError, RuntimeError):
+        return False
+
+
+_HAS_NATIVE_ASCEND_KERNEL = _has_native_ascend_kernel()
+
+
+def torch_log_sigmoid_backward(grad_output, inp, buffer):
+    if _HAS_NATIVE_ASCEND_KERNEL:
+        return torch.ops.aten.log_sigmoid_backward(grad_output, inp, buffer)
+
+    # Some Ascend PyTorch builds do not provide this ATen C kernel. In that
+    # case compare against the equivalent composition of native device ops.
+    return grad_output * torch.sigmoid(-inp)
 
 
 class LogSigmoidBackwardBenchmark(base.UnaryPointwiseBenchmark):
@@ -19,7 +44,8 @@ class LogSigmoidBackwardBenchmark(base.UnaryPointwiseBenchmark):
 def test_log_sigmoid_backward():
     bench = LogSigmoidBackwardBenchmark(
         op_name="log_sigmoid_backward",
-        torch_op=torch.ops.aten.log_sigmoid_backward,
+        torch_op=torch_log_sigmoid_backward,
+        gems_op=flag_gems.log_sigmoid_backward,
         dtypes=consts.FLOAT_DTYPES,
     )
     bench.run()
