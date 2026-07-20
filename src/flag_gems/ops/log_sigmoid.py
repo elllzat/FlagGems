@@ -1,8 +1,10 @@
 import logging
 
+import torch
 import triton
 import triton.language as tl
 
+from flag_gems.runtime import torch_device_fn
 from flag_gems.utils import pointwise_dynamic
 
 logger = logging.getLogger(__name__)
@@ -23,6 +25,52 @@ def log_sigmoid_backward_kernel(grad_output, self):
     return grad_output * derivative
 
 
+@triton.jit
+def log_sigmoid_backward_contiguous_kernel(
+    grad_output,
+    self,
+    grad_input,
+    n_elements,
+    BLOCK_SIZE: tl.constexpr,
+):
+    offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+    grad = tl.load(grad_output + offsets, mask=mask)
+    inp = tl.load(self + offsets, mask=mask).to(tl.float32)
+    result = grad * tl.sigmoid(-inp)
+    tl.store(grad_input + offsets, result, mask=mask)
+
+
+def _can_use_contiguous_kernel(grad_output, self, grad_input=None):
+    return (
+        grad_output.shape == self.shape
+        and grad_output.dtype == self.dtype
+        and grad_output.is_contiguous()
+        and self.is_contiguous()
+        and (grad_input is None or grad_input.is_contiguous())
+    )
+
+
+def _launch_contiguous_kernel(grad_output, self, grad_input=None):
+    if grad_input is None:
+        grad_input = torch.empty_like(self)
+    n_elements = self.numel()
+    if n_elements == 0:
+        return grad_input
+
+    block_size = 256
+    grid = (triton.cdiv(n_elements, block_size),)
+    with torch_device_fn.device(self.device):
+        log_sigmoid_backward_contiguous_kernel[grid](
+            grad_output,
+            self,
+            grad_input,
+            n_elements,
+            BLOCK_SIZE=block_size,
+        )
+    return grad_input
+
+
 def log_sigmoid(x):
     logger.debug("GEMS LOG_SIGMOID FORWARD")
 
@@ -36,6 +84,8 @@ def log_sigmoid_backward(grad_output, self, buffer):
     # CUDA log_sigmoid_forward returns an empty buffer, so recomputing z here is
     # required for both the direct ATen operator and autograd integration.
     del buffer
+    if _can_use_contiguous_kernel(grad_output, self):
+        return _launch_contiguous_kernel(grad_output, self)
     return log_sigmoid_backward_kernel(grad_output, self)
 
 
@@ -43,4 +93,6 @@ def log_sigmoid_backward_out(grad_output, self, buffer, *, grad_input):
     logger.debug("GEMS LOG_SIGMOID BACKWARD OUT")
 
     del buffer
+    if _can_use_contiguous_kernel(grad_output, self, grad_input):
+        return _launch_contiguous_kernel(grad_output, self, grad_input)
     return log_sigmoid_backward_kernel(grad_output, self, out0=grad_input)
