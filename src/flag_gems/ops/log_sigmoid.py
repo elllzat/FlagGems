@@ -58,7 +58,7 @@ def _launch_contiguous_kernel(grad_output, self, grad_input=None):
     if n_elements == 0:
         return grad_input
 
-    block_size = 256
+    block_size = 1024
     grid = (triton.cdiv(n_elements, block_size),)
     with torch_device_fn.device(self.device):
         log_sigmoid_backward_contiguous_kernel[grid](
