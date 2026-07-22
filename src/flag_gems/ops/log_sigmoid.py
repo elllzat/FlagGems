@@ -67,10 +67,12 @@ def _launch_contiguous_kernel(grad_output, self, buffer, grad_input=None):
 
     block_size = 1024
     grid = (triton.cdiv(n_elements, block_size),)
+    # For FP32 the extra buffer read costs more than fused sigmoid recomputation.
     has_buffer = (
         buffer.numel() == n_elements
         and buffer.dtype == self.dtype
         and buffer.is_contiguous()
+        and self.dtype != torch.float32
     )
     with torch_device_fn.device(self.device):
         log_sigmoid_backward_contiguous_kernel[grid](
