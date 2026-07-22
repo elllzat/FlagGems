@@ -26,10 +26,8 @@ def log_sigmoid_backward_kernel(grad_output, self):
 def log_sigmoid_backward_contiguous_kernel(
     grad_output,
     self,
-    buffer,
     grad_input,
     n_elements,
-    HAS_BUFFER: tl.constexpr,
     TILES_PER_PROGRAM: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -41,12 +39,7 @@ def log_sigmoid_backward_contiguous_kernel(
         mask = offsets < n_elements
         grad = tl.load(grad_output + offsets, mask=mask)
         inp = tl.load(self + offsets, mask=mask).to(tl.float32)
-        if HAS_BUFFER:
-            z = tl.load(buffer + offsets, mask=mask).to(tl.float32)
-            derivative = tl.where(inp < 0.0, 1.0, z) / (1.0 + z)
-        else:
-            derivative = tl.sigmoid(-inp)
-        result = grad * derivative
+        result = grad * tl.sigmoid(-inp)
         tl.store(grad_input + offsets, result, mask=mask)
 
 
@@ -67,30 +60,23 @@ def _device_guard(tensor):
     return torch_device_fn.device(tensor.device)
 
 
-def _launch_contiguous_kernel(grad_output, self, buffer, grad_input=None):
+def _launch_contiguous_kernel(grad_output, self, grad_input=None):
     if grad_input is None:
         grad_input = torch.empty_like(self)
     n_elements = self.numel()
     if n_elements == 0:
         return grad_input
 
-    block_size = 4096
+    block_size = 8192
     tile_count = triton.cdiv(n_elements, block_size)
     grid_size = min(tile_count, 65535)
     tiles_per_program = triton.cdiv(tile_count, grid_size)
-    has_buffer = (
-        buffer.numel() == n_elements
-        and buffer.dtype == self.dtype
-        and buffer.is_contiguous()
-    )
     with _device_guard(self):
         log_sigmoid_backward_contiguous_kernel[(grid_size,)](
             grad_output,
             self,
-            buffer,
             grad_input,
             n_elements,
-            HAS_BUFFER=has_buffer,
             TILES_PER_PROGRAM=tiles_per_program,
             BLOCK_SIZE=block_size,
         )
@@ -100,14 +86,16 @@ def _launch_contiguous_kernel(grad_output, self, buffer, grad_input=None):
 def log_sigmoid_backward(grad_output, self, buffer):
     logger.debug("GEMS_ASCEND LOG_SIGMOID BACKWARD")
 
+    del buffer
     if _can_use_contiguous_kernel(grad_output, self):
-        return _launch_contiguous_kernel(grad_output, self, buffer)
+        return _launch_contiguous_kernel(grad_output, self)
     return log_sigmoid_backward_kernel(grad_output, self)
 
 
 def log_sigmoid_backward_out(grad_output, self, buffer, *, grad_input):
     logger.debug("GEMS_ASCEND LOG_SIGMOID BACKWARD OUT")
 
+    del buffer
     if _can_use_contiguous_kernel(grad_output, self, grad_input):
-        return _launch_contiguous_kernel(grad_output, self, buffer, grad_input)
+        return _launch_contiguous_kernel(grad_output, self, grad_input)
     return log_sigmoid_backward_kernel(grad_output, self, out0=grad_input)

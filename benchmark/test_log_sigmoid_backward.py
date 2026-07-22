@@ -21,7 +21,7 @@ def _has_native_ascend_kernel() -> bool:
 
 _HAS_NATIVE_ASCEND_KERNEL = _has_native_ascend_kernel()
 _DEFAULT_STARTUP_OVERHEAD_SHAPE = (64, 64)
-_ASCEND_STARTUP_OVERHEAD_SHAPE = (3584, 3584)
+_ASCEND_STARTUP_OVERHEAD_SHAPE = (4608, 4608)
 _CORE_SHAPE_REPLACEMENTS = {
     (1024 * 1024 * 1024,): (32 * 1024 * 1024,),
     (1024, 1024, 1024): (128, 512, 512),
@@ -50,7 +50,7 @@ class LogSigmoidBackwardBenchmark(base.UnaryPointwiseBenchmark):
         if flag_gems.vendor_name == "ascend":
             # The native 64x64 kernel completes near the device timing floor, so
             # it does not provide a meaningful comparison with a Triton launch.
-            # On 910B, 3584x3584 remains in the Triton launch-latency plateau
+            # On 910B, 4608x4608 remains dominated by Triton launch overhead
             # while being large enough to produce stable native measurements.
             self.shapes = [
                 (
