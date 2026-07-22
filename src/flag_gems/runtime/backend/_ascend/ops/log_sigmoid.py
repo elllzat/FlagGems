@@ -1,4 +1,5 @@
 import logging
+from contextlib import nullcontext
 
 import torch
 import triton
@@ -52,6 +53,13 @@ def _can_use_contiguous_kernel(grad_output, self, grad_input=None):
     )
 
 
+def _device_guard(tensor):
+    device_index = tensor.device.index
+    if device_index is None or device_index == torch_device_fn.current_device():
+        return nullcontext()
+    return torch_device_fn.device(tensor.device)
+
+
 def _launch_contiguous_kernel(grad_output, self, grad_input=None):
     if grad_input is None:
         grad_input = torch.empty_like(self)
@@ -63,7 +71,7 @@ def _launch_contiguous_kernel(grad_output, self, grad_input=None):
     tile_count = triton.cdiv(n_elements, block_size)
     grid_size = min(tile_count, 65535)
     tiles_per_program = triton.cdiv(tile_count, grid_size)
-    with torch_device_fn.device(self.device):
+    with _device_guard(self):
         log_sigmoid_backward_contiguous_kernel[(grid_size,)](
             grad_output,
             self,
