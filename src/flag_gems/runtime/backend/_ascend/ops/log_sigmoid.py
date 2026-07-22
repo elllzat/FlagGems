@@ -74,7 +74,7 @@ def _launch_contiguous_kernel(grad_output, self, buffer, grad_input=None):
     if n_elements == 0:
         return grad_input
 
-    block_size = 8192
+    block_size = 4096
     tile_count = triton.cdiv(n_elements, block_size)
     grid_size = min(tile_count, 65535)
     tiles_per_program = triton.cdiv(tile_count, grid_size)
