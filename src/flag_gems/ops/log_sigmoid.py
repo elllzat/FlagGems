@@ -29,15 +29,22 @@ def log_sigmoid_backward_kernel(grad_output, self):
 def log_sigmoid_backward_contiguous_kernel(
     grad_output,
     self,
+    buffer,
     grad_input,
     n_elements,
+    HAS_BUFFER: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offsets < n_elements
     grad = tl.load(grad_output + offsets, mask=mask)
     inp = tl.load(self + offsets, mask=mask).to(tl.float32)
-    result = grad * tl.sigmoid(-inp)
+    if HAS_BUFFER:
+        z = tl.load(buffer + offsets, mask=mask).to(tl.float32)
+        derivative = tl.where(inp < 0.0, 1.0 / (1.0 + z), z / (1.0 + z))
+    else:
+        derivative = tl.sigmoid(-inp)
+    result = grad * derivative
     tl.store(grad_input + offsets, result, mask=mask)
 
 
@@ -51,7 +58,7 @@ def _can_use_contiguous_kernel(grad_output, self, grad_input=None):
     )
 
 
-def _launch_contiguous_kernel(grad_output, self, grad_input=None):
+def _launch_contiguous_kernel(grad_output, self, buffer, grad_input=None):
     if grad_input is None:
         grad_input = torch.empty_like(self)
     n_elements = self.numel()
@@ -60,12 +67,19 @@ def _launch_contiguous_kernel(grad_output, self, grad_input=None):
 
     block_size = 1024
     grid = (triton.cdiv(n_elements, block_size),)
+    has_buffer = (
+        buffer.numel() == n_elements
+        and buffer.dtype == self.dtype
+        and buffer.is_contiguous()
+    )
     with torch_device_fn.device(self.device):
         log_sigmoid_backward_contiguous_kernel[grid](
             grad_output,
             self,
+            buffer,
             grad_input,
             n_elements,
+            HAS_BUFFER=has_buffer,
             BLOCK_SIZE=block_size,
         )
     return grad_input
@@ -80,19 +94,14 @@ def log_sigmoid(x):
 def log_sigmoid_backward(grad_output, self, buffer):
     logger.debug("GEMS LOG_SIGMOID BACKWARD")
 
-    # PyTorch's CUDA implementation intentionally ignores the forward buffer.
-    # CUDA log_sigmoid_forward returns an empty buffer, so recomputing z here is
-    # required for both the direct ATen operator and autograd integration.
-    del buffer
     if _can_use_contiguous_kernel(grad_output, self):
-        return _launch_contiguous_kernel(grad_output, self)
+        return _launch_contiguous_kernel(grad_output, self, buffer)
     return log_sigmoid_backward_kernel(grad_output, self)
 
 
 def log_sigmoid_backward_out(grad_output, self, buffer, *, grad_input):
     logger.debug("GEMS LOG_SIGMOID BACKWARD OUT")
 
-    del buffer
     if _can_use_contiguous_kernel(grad_output, self, grad_input):
-        return _launch_contiguous_kernel(grad_output, self, grad_input)
+        return _launch_contiguous_kernel(grad_output, self, buffer, grad_input)
     return log_sigmoid_backward_kernel(grad_output, self, out0=grad_input)
