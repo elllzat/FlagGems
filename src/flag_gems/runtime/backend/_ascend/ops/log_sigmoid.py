@@ -43,7 +43,7 @@ def log_sigmoid_backward_contiguous_kernel(
         inp = tl.load(self + offsets, mask=mask).to(tl.float32)
         if HAS_BUFFER:
             z = tl.load(buffer + offsets, mask=mask).to(tl.float32)
-            derivative = tl.where(inp < 0.0, 1.0 / (1.0 + z), z / (1.0 + z))
+            derivative = tl.where(inp < 0.0, 1.0, z) / (1.0 + z)
         else:
             derivative = tl.sigmoid(-inp)
         result = grad * derivative
