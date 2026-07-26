@@ -1,7 +1,6 @@
 import logging
 from contextlib import nullcontext
 
-import torch
 import triton
 import triton.language as tl
 
@@ -62,7 +61,11 @@ def _device_guard(tensor):
 
 def _launch_contiguous_kernel(grad_output, self, grad_input=None):
     if grad_input is None:
-        grad_input = torch.empty_like(self)
+        import flag_gems
+
+        grad_input = flag_gems.empty(
+            *self.shape, dtype=self.dtype, device=self.device
+        )
     n_elements = self.numel()
     if n_elements == 0:
         return grad_input
