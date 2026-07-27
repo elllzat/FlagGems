@@ -20,29 +20,10 @@ def _has_native_ascend_kernel() -> bool:
 
 
 _HAS_NATIVE_ASCEND_KERNEL = _has_native_ascend_kernel()
-_CORE_THROUGHPUT_SHAPES = [
-    (16 * 1024 * 1024,),
-    (1024, 16384),
-    (4096, 4096),
-    (64, 64, 4096),
-    (64, 512, 512),
-]
-_COMPREHENSIVE_THROUGHPUT_SHAPES = [
-    (16 * 1024 * 1024,),
-    (256, 65536),
-    (512, 32768),
-    (1024, 16384),
-    (2048, 8192),
-    (4096, 4096),
-    (8192, 2048),
-    (16384, 1024),
-    (32768, 512),
-    (32, 512, 1024),
-    (64, 64, 4096),
-    (64, 512, 512),
-    (128, 256, 512),
-    (256, 256, 256),
-]
+_SHAPE_REPLACEMENTS = {
+    (1024 * 1024 * 1024,): (32 * 1024 * 1024,),
+    (1024, 1024, 1024): (128, 512, 512),
+}
 
 
 def torch_log_sigmoid_backward(grad_output, inp, buffer):
@@ -57,13 +38,10 @@ def torch_log_sigmoid_backward(grad_output, inp, buffer):
 class LogSigmoidBackwardBenchmark(base.UnaryPointwiseBenchmark):
     def set_shapes(self, shape_file_path=None):
         super().set_shapes(shape_file_path)
-        # Use the same throughput-oriented 1D, 2D, and 3D workloads on every
-        # backend. Tiny shapes mostly measure framework and kernel-launch floors,
-        # while the generic billion-element cases are unstable on shared devices.
-        if base.Config.bench_level == consts.BenchLevel.COMPREHENSIVE:
-            self.shapes = _COMPREHENSIVE_THROUGHPUT_SHAPES
-        else:
-            self.shapes = _CORE_THROUGHPUT_SHAPES
+        # Keep the standard unary pointwise size and rank coverage. Replace only
+        # the two billion-element defaults because this benchmark needs three
+        # inputs and an output, which makes those cases unstable on shared devices.
+        self.shapes = [_SHAPE_REPLACEMENTS.get(shape, shape) for shape in self.shapes]
 
     def get_input_iter(self, cur_dtype) -> Generator:
         for shape in self.shapes:
