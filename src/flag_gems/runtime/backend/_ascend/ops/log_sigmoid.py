@@ -68,12 +68,7 @@ def _launch_contiguous_kernel(grad_output, self, grad_input=None):
     if n_elements == 0:
         return grad_input
 
-    if n_elements <= 4096:
-        block_size = 1024
-    elif n_elements <= 262144:
-        block_size = 4096
-    else:
-        block_size = 8192
+    block_size = 8192
     tile_count = triton.cdiv(n_elements, block_size)
     grid_size = min(tile_count, 65535)
     tiles_per_program = triton.cdiv(tile_count, grid_size)
@@ -93,7 +88,7 @@ def log_sigmoid_backward(grad_output, self, buffer):
     logger.debug("GEMS_ASCEND LOG_SIGMOID BACKWARD")
 
     del buffer
-    if _can_use_contiguous_kernel(grad_output, self):
+    if _can_use_contiguous_kernel(grad_output, self) and self.numel() > 4096:
         return _launch_contiguous_kernel(grad_output, self)
     return log_sigmoid_backward_kernel(grad_output, self)
 
