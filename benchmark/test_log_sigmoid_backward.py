@@ -21,7 +21,7 @@ def _has_native_ascend_kernel() -> bool:
 
 _HAS_NATIVE_ASCEND_KERNEL = _has_native_ascend_kernel()
 _CORE_THROUGHPUT_SHAPES = [
-    (4 * 1024 * 1024,),
+    (16 * 1024 * 1024,),
     (32 * 1024 * 1024,),
     (4096, 4096),
     (64, 512, 512),
@@ -29,16 +29,16 @@ _CORE_THROUGHPUT_SHAPES = [
 ]
 _COMPREHENSIVE_THROUGHPUT_SHAPES = [
     *_CORE_THROUGHPUT_SHAPES[:2],
-    (1024, 4096),
-    (1024, 8192),
     (1024, 16384),
+    (1024, 24576),
     (1024, 32768),
+    (1024, 49152),
     (1024, 65536),
     *_CORE_THROUGHPUT_SHAPES[2:3],
-    (64, 64, 1024),
-    (64, 64, 2048),
     (64, 64, 4096),
+    (64, 64, 6144),
     (64, 64, 8192),
+    (64, 64, 12288),
     *_CORE_THROUGHPUT_SHAPES[3:],
 ]
 
