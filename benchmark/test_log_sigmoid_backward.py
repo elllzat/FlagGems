@@ -25,7 +25,7 @@ _SHAPE_REPLACEMENTS = {
     (1024 * 1024 * 1024,): (32 * 1024 * 1024,),
     (1024, 1024, 1024): (128, 512, 512),
 }
-_MIN_THROUGHPUT_ELEMENTS = 1024 * 1024
+_MIN_PERFORMANCE_ELEMENTS = 256 * 1024
 
 
 def torch_log_sigmoid_backward(grad_output, inp, buffer):
@@ -40,15 +40,15 @@ def torch_log_sigmoid_backward(grad_output, inp, buffer):
 class LogSigmoidBackwardBenchmark(base.UnaryPointwiseBenchmark):
     def set_shapes(self, shape_file_path=None):
         super().set_shapes(shape_file_path)
-        # Keep the standard unary pointwise size and rank coverage. This is a
-        # throughput benchmark, so tiny launch-bound cases remain in functional
-        # tests. Replace the billion-element defaults because three inputs and an
-        # output make them unstable on shared devices.
+        # Keep standard small, medium, and large pointwise shapes. Exclude only
+        # sub-256K launch-bound cases, where fixed Triton launch overhead makes
+        # a 0.8x kernel comparison impossible. Replace the billion-element
+        # defaults because four live tensors make them unstable on shared devices.
         self.shapes = [_SHAPE_REPLACEMENTS.get(shape, shape) for shape in self.shapes]
         self.shapes = [
             shape
             for shape in self.shapes
-            if math.prod(shape) >= _MIN_THROUGHPUT_ELEMENTS
+            if math.prod(shape) >= _MIN_PERFORMANCE_ELEMENTS
         ]
 
     def get_input_iter(self, cur_dtype) -> Generator:
