@@ -12,7 +12,7 @@ from flag_gems.utils.codegen_config_utils import CodeGenConfig
 logger = logging.getLogger(__name__)
 
 _LOG_SIGMOID_BACKWARD_CONFIG = CodeGenConfig(
-    max_tile_size=8192,
+    max_tile_size=4096,
     max_grid_size=(65535, 1, 1),
     max_num_warps_per_cta=32,
     prefer_block_pointer=False,
