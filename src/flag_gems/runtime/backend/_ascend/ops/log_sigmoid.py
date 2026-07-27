@@ -7,11 +7,24 @@ import triton.language as tl
 from flag_gems.runtime import torch_device_fn
 from flag_gems.utils import libentry, pointwise_dynamic
 from flag_gems.utils import triton_lang_extension as ext
+from flag_gems.utils.codegen_config_utils import CodeGenConfig
 
 logger = logging.getLogger(__name__)
 
+_LOG_SIGMOID_BACKWARD_CONFIG = CodeGenConfig(
+    max_tile_size=8192,
+    max_grid_size=(65535, 1, 1),
+    max_num_warps_per_cta=32,
+    prefer_block_pointer=False,
+    prefer_1d_tile=True,
+)
 
-@pointwise_dynamic(is_tensor=[True, True], promotion_methods=[(0, 1, "DEFAULT")])
+
+@pointwise_dynamic(
+    is_tensor=[True, True],
+    promotion_methods=[(0, 1, "DEFAULT")],
+    config=_LOG_SIGMOID_BACKWARD_CONFIG,
+)
 @triton.jit
 def log_sigmoid_backward_kernel(grad_output, self):
     self_fp32 = self.to(tl.float32)
