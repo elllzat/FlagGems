@@ -88,7 +88,7 @@ def log_sigmoid_backward(grad_output, self, buffer):
     logger.debug("GEMS_ASCEND LOG_SIGMOID BACKWARD")
 
     del buffer
-    if _can_use_contiguous_kernel(grad_output, self) and self.numel() > 4096:
+    if _can_use_contiguous_kernel(grad_output, self):
         return _launch_contiguous_kernel(grad_output, self)
     return log_sigmoid_backward_kernel(grad_output, self)
 
