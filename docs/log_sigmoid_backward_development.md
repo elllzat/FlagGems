@@ -58,6 +58,7 @@ grad_input=torch.ops.aten.log_sigmoid_backward(grad_output,self,buffer)
 ```
 输出shape为`(2,3)`。每个元素由对应的`grad_output`乘以log sigmoid导数得到。
 ## 实现方案
+默认返回变体通过已支持的`flag_gems.empty`分配输出。原实现先调用`torch.zeros`分配并额外启动写零Triton kernel，不符合`empty`无需初始化的性能预期。当前实现通过BackendSelect redispatch调用设备原生未初始化分配器，避免额外kernel，同时保留tuple size、dtype、device、layout、pin_memory和memory_format参数传递。该公共修改已在NVIDIA、Ascend和T-Head平台通过`benchmark/test_empty.py --level core`验证，NVIDIA另行验证了tuple size、channels-last memory format和`use_gems(include=["empty"])`注册路径。
 ### NVIDIA GPU平台实现方案
 NVIDIA GPU平台使用Triton kernel实现。核心流程是：
 1. 检查输入shape、dtype和连续性。
@@ -87,9 +88,9 @@ grad_output/self/buffer
 NVIDIA GPU性能对比Torch baseline：
 |dtype|测试模式|最低加速比|最高加速比|
 |---|---|---:|---:|
-|float16|kernel core|1.059x|1.119x|
-|float32|kernel core|1.008x|1.072x|
-|bfloat16|kernel core|1.059x|1.099x|
+|float16|kernel comprehensive|1.011x|1.442x|
+|float32|kernel comprehensive|1.005x|1.421x|
+|bfloat16|kernel comprehensive|1.002x|1.424x|
 ### Ascend NPU平台实现方案
 Ascend NPU平台使用Triton kernel实现，不回调torch_npu原生`log_sigmoid_backward`。
 实现流程：
@@ -116,9 +117,10 @@ NPU grad_output/self
 Ascend NPU性能对比Torch baseline：
 |dtype|测试模式|最低加速比|最高加速比|
 |---|---|---:|---:|
-|float16|kernel core|1.338x|1.353x|
-|float32|kernel core|1.021x|1.078x|
-|bfloat16|kernel core|1.332x|1.351x|
+|float16|kernel comprehensive|0.747x|2.179x|
+|float32|kernel comprehensive|0.610x|1.884x|
+|bfloat16|kernel comprehensive|0.732x|2.081x|
+Ascend comprehensive共42个case，其中37个case超过0.8x。低于0.8x的5个case只有1024或4096个元素，Torch基线为0.002000ms至0.002560ms，性能比主要受设备计时和kernel启动下限影响。
 ### Hygon DCU平台实现方案
 Hygon DCU平台使用独立后端文件中的Triton实现，计算路径与NVIDIA版本一致。
 性能优化手段：
@@ -143,8 +145,8 @@ T-Head PPU平台使用独立后端文件中的Triton实现。
 T-Head PPU性能对比Torch baseline：
 |dtype|测试模式|最低加速比|最高加速比|
 |---|---|---:|---:|
-|float16|kernel comprehensive|0.975x|1.552x|
-|float32|kernel comprehensive|1.001x|1.466x|
+|float16|kernel comprehensive|0.976x|1.534x|
+|float32|kernel comprehensive|1.002x|1.483x|
 |bfloat16|kernel comprehensive|0.984x|1.448x|
 ## 功能性测试
 功能测试主要覆盖以下场景：
