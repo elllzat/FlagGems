@@ -61,9 +61,7 @@ def _launch_contiguous_kernel(grad_output, self, buffer, grad_input=None):
     if grad_input is None:
         import flag_gems
 
-        grad_input = flag_gems.empty(
-            *self.shape, dtype=self.dtype, device=self.device
-        )
+        grad_input = flag_gems.empty(*self.shape, dtype=self.dtype, device=self.device)
     n_elements = self.numel()
     if n_elements == 0:
         return grad_input

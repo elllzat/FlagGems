@@ -44,23 +44,19 @@ def test_log_sigmoid_backward(shape, dtype):
     ref_grad = utils.to_reference(res_grad, True)
     ref_buffer = torch.exp(-torch.abs(ref_inp))
 
-    ref_in_grad = torch.ops.aten.log_sigmoid_backward(
-        ref_grad, ref_inp, ref_buffer
-    )
+    ref_in_grad = torch.ops.aten.log_sigmoid_backward(ref_grad, ref_inp, ref_buffer)
     # CUDA's native forward returns an empty buffer. The backward operator must
     # therefore not require buffer elements on device backends.
     res_buffer = torch.empty(0, dtype=dtype, device=flag_gems.device)
     with flag_gems.use_gems(include=["log_sigmoid_backward"]):
-        res_in_grad = torch.ops.aten.log_sigmoid_backward(
-            res_grad, res_inp, res_buffer
-        )
+        res_in_grad = torch.ops.aten.log_sigmoid_backward(res_grad, res_inp, res_buffer)
 
     utils.gems_assert_close(res_in_grad, ref_in_grad, dtype)
 
 
-@pytest.mark.log_sigmoid_backward
+@pytest.mark.log_sigmoid_backward_out
 @pytest.mark.parametrize("dtype", utils.FLOAT_DTYPES)
-def test_log_sigmoid_backward_noncontiguous_and_out(dtype):
+def test_log_sigmoid_backward_out_noncontiguous(dtype):
     res_inp = torch.randn((4, 3), dtype=dtype, device=flag_gems.device).T
     res_grad = torch.randn_like(res_inp)
     res_buffer = torch.empty(0, dtype=dtype, device=flag_gems.device)
@@ -85,7 +81,25 @@ def test_log_sigmoid_backward_noncontiguous_and_out(dtype):
 
 @pytest.mark.log_sigmoid_backward
 @pytest.mark.parametrize("dtype", utils.FLOAT_DTYPES)
-def test_log_sigmoid_backward_contiguous_buffer_and_out(dtype):
+def test_log_sigmoid_backward_contiguous_buffer(dtype):
+    res_inp = torch.randn((37, 41), dtype=dtype, device=flag_gems.device)
+    res_grad = torch.randn_like(res_inp)
+    res_buffer = torch.exp(-torch.abs(res_inp))
+
+    ref_inp = utils.to_reference(res_inp, True)
+    ref_grad = utils.to_reference(res_grad, True)
+    ref_buffer = torch.exp(-torch.abs(ref_inp))
+    ref_in_grad = torch.ops.aten.log_sigmoid_backward(ref_grad, ref_inp, ref_buffer)
+
+    with flag_gems.use_gems(include=["log_sigmoid_backward"]):
+        res_in_grad = torch.ops.aten.log_sigmoid_backward(res_grad, res_inp, res_buffer)
+
+    utils.gems_assert_close(res_in_grad, ref_in_grad, dtype)
+
+
+@pytest.mark.log_sigmoid_backward_out
+@pytest.mark.parametrize("dtype", utils.FLOAT_DTYPES)
+def test_log_sigmoid_backward_out_contiguous_buffer(dtype):
     res_inp = torch.randn((37, 41), dtype=dtype, device=flag_gems.device)
     res_grad = torch.randn_like(res_inp)
     res_buffer = torch.exp(-torch.abs(res_inp))
@@ -94,27 +108,20 @@ def test_log_sigmoid_backward_contiguous_buffer_and_out(dtype):
     ref_inp = utils.to_reference(res_inp, True)
     ref_grad = utils.to_reference(res_grad, True)
     ref_buffer = torch.exp(-torch.abs(ref_inp))
-    ref_in_grad = torch.ops.aten.log_sigmoid_backward(
-        ref_grad, ref_inp, ref_buffer
-    )
+    ref_in_grad = torch.ops.aten.log_sigmoid_backward(ref_grad, ref_inp, ref_buffer)
 
-    with flag_gems.use_gems(include=["log_sigmoid_backward"]):
-        res_in_grad = torch.ops.aten.log_sigmoid_backward(
-            res_grad, res_inp, res_buffer
-        )
     with flag_gems.use_gems(include=["log_sigmoid_backward_out"]):
         result = torch.ops.aten.log_sigmoid_backward.grad_input(
             res_grad, res_inp, res_buffer, grad_input=res_grad_input
         )
 
     assert result is res_grad_input
-    utils.gems_assert_close(res_in_grad, ref_in_grad, dtype)
     utils.gems_assert_close(res_grad_input, ref_in_grad, dtype)
 
 
 @pytest.mark.log_sigmoid_backward
 @pytest.mark.parametrize("dtype", utils.FLOAT_DTYPES)
-def test_log_sigmoid_backward_autograd(dtype):
+def test_log_sigmoid_backward_via_autograd(dtype):
     res_inp = torch.randn(
         (4, 7), dtype=dtype, device=flag_gems.device, requires_grad=True
     )
