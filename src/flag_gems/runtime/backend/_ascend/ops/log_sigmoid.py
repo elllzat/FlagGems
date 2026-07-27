@@ -59,7 +59,11 @@ def _device_guard(tensor):
     return torch_device_fn.device(tensor.device)
 
 
-def _launch_contiguous_kernel(grad_output, self, grad_input):
+def _launch_contiguous_kernel(grad_output, self, grad_input=None):
+    if grad_input is None:
+        import flag_gems
+
+        grad_input = flag_gems.empty(*self.shape, dtype=self.dtype, device=self.device)
     n_elements = self.numel()
     if n_elements == 0:
         return grad_input
@@ -84,6 +88,8 @@ def log_sigmoid_backward(grad_output, self, buffer):
     logger.debug("GEMS_ASCEND LOG_SIGMOID BACKWARD")
 
     del buffer
+    if _can_use_contiguous_kernel(grad_output, self):
+        return _launch_contiguous_kernel(grad_output, self)
     return log_sigmoid_backward_kernel(grad_output, self)
 
 

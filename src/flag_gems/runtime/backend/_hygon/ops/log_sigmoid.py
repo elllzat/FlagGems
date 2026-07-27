@@ -25,15 +25,6 @@ def log_sigmoid_backward_kernel(grad_output, self):
     return grad_output * derivative
 
 
-@pointwise_dynamic(is_tensor=[True, True, True], promotion_methods=[(0, 1, "DEFAULT")])
-@triton.jit
-def log_sigmoid_backward_buffer_kernel(grad_output, self, buffer):
-    self_fp32 = self.to(tl.float32)
-    z = buffer.to(tl.float32)
-    derivative = tl.where(self_fp32 < 0.0, 1.0, z) / (1.0 + z)
-    return grad_output * derivative
-
-
 @triton.jit
 def log_sigmoid_backward_contiguous_kernel(
     grad_output,
@@ -67,7 +58,11 @@ def _can_use_contiguous_kernel(grad_output, self, grad_input=None):
     )
 
 
-def _launch_contiguous_kernel(grad_output, self, buffer, grad_input):
+def _launch_contiguous_kernel(grad_output, self, buffer, grad_input=None):
+    if grad_input is None:
+        import flag_gems
+
+        grad_input = flag_gems.empty(*self.shape, dtype=self.dtype, device=self.device)
     n_elements = self.numel()
     if n_elements == 0:
         return grad_input
@@ -103,13 +98,8 @@ def log_sigmoid(x):
 def log_sigmoid_backward(grad_output, self, buffer):
     logger.debug("GEMS LOG_SIGMOID BACKWARD")
 
-    if (
-        buffer.shape == self.shape
-        and buffer.dtype == self.dtype
-        and buffer.is_contiguous()
-        and self.dtype != torch.float32
-    ):
-        return log_sigmoid_backward_buffer_kernel(grad_output, self, buffer)
+    if _can_use_contiguous_kernel(grad_output, self):
+        return _launch_contiguous_kernel(grad_output, self, buffer)
     return log_sigmoid_backward_kernel(grad_output, self)
 
 
