@@ -59,6 +59,7 @@ from .pow import (
     pow_tensor_tensor_,
 )
 from .randperm import randperm
+from .rnn_tanh import rnn_tanh, rnn_tanh_data
 from .silu import silu, silu_, silu_backward
 from .sort import sort, sort_stable
 from .unique import _unique2
@@ -102,6 +103,8 @@ __all__ = [
     "randperm",
     "remainder",
     "remainder_",
+    "rnn_tanh",
+    "rnn_tanh_data",
     "scaled_dot_product_attention",
     "scaled_dot_product_attention_backward",
     "scaled_dot_product_attention_forward",

@@ -707,6 +707,8 @@ _FULL_CONFIG = (
     ("resolve_neg", resolve_neg),
     ("rms_norm", rms_norm),
     ("rnn_relu", rnn_relu),
+    ("rnn_tanh.input", rnn_tanh),
+    ("rnn_tanh.data", rnn_tanh_data),
     ("roll", roll),
     ("rot90", rot90),
     ("round", round),
@@ -911,6 +913,13 @@ for _alias, _target in (
 ):
     if _target in FULL_CONFIG_BY_FUNC:
         FULL_CONFIG_BY_FUNC.setdefault(_alias, []).extend(FULL_CONFIG_BY_FUNC[_target])
+
+# Both aten::rnn_tanh overloads belong to the same public operator.  Selecting
+# only "rnn_tanh" must therefore register the packed-data implementation too.
+if "rnn_tanh_data" in FULL_CONFIG_BY_FUNC:
+    FULL_CONFIG_BY_FUNC.setdefault("rnn_tanh", []).extend(
+        FULL_CONFIG_BY_FUNC["rnn_tanh_data"]
+    )
 
 
 def enable(
