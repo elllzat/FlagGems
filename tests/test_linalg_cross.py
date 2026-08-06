@@ -51,8 +51,8 @@ def _assert_cross_close(result, reference, dtype):
         torch.testing.assert_close(result, reference, rtol=1e-10, atol=1e-10)
     elif dtype == torch.float16:
         # A cross-product component subtracts two rounded products. Near-zero
-        # cancellation therefore needs one FP16 quantization step of atol.
-        utils.gems_assert_close(result, reference, dtype, atol=1e-3)
+        # cancellation can therefore accumulate two FP16 quantization steps.
+        utils.gems_assert_close(result, reference, dtype, atol=2e-3)
     elif dtype == torch.bfloat16:
         # BF16 has a wider quantization step than FP16 for unit-scale values.
         utils.gems_assert_close(result, reference, dtype, atol=1e-2)
