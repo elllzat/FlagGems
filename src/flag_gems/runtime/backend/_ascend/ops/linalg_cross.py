@@ -40,50 +40,25 @@ _SUPPORTED_DTYPES = (
 
 
 @triton.jit
-def _round_fp16_to_fp32(value):
-    bits = value.to(tl.int32, bitcast=True)
-    sign = bits & -2147483648
-    abs_bits = bits & 0x7FFFFFFF
-    abs_value = abs_bits.to(tl.float32, bitcast=True)
-
-    rounded_bits = abs_bits + 0xFFF + ((abs_bits >> 13) & 1)
-    rounded_bits &= -8192
-    rounded_bits = tl.where(rounded_bits >= 0x47800000, 0x7F800000, rounded_bits)
-    normal_value = rounded_bits.to(tl.float32, bitcast=True)
-
-    scaled = tl.minimum(abs_value * 16777216.0, 1024.0)
-    base = scaled.to(tl.int32)
-    fraction = scaled - base.to(tl.float32)
-    round_up = (fraction > 0.5) | ((fraction == 0.5) & ((base & 1) != 0))
-    subnormal_value = (base + round_up.to(tl.int32)).to(tl.float32) * (1.0 / 16777216.0)
-
-    rounded_abs = tl.where(abs_value < (1.0 / 16384.0), subnormal_value, normal_value)
-    rounded_abs = tl.where(abs_bits >= 0x7F800000, abs_value, rounded_abs)
-    rounded_abs_bits = rounded_abs.to(tl.int32, bitcast=True)
-    return (rounded_abs_bits | sign).to(tl.float32, bitcast=True)
-
-
-@triton.jit
-def _round_bf16_to_fp32(value):
-    bits = value.to(tl.int32, bitcast=True)
-    sign = bits & -2147483648
-    abs_bits = bits & 0x7FFFFFFF
-    rounded_bits = abs_bits + 0x7FFF + ((abs_bits >> 16) & 1)
-    rounded_bits &= -65536
-    rounded_bits = tl.where(abs_bits >= 0x7F800000, abs_bits, rounded_bits)
-    return (rounded_bits | sign).to(tl.float32, bitcast=True)
-
-
-@triton.jit
-def _real_cross_component(lhs_a, rhs_a, lhs_b, rhs_b, ELEMENT_TY: tl.constexpr):
-    if tl.constexpr(ELEMENT_TY == tl.float16):
-        product_a = _round_fp16_to_fp32(lhs_a.to(tl.float32) * rhs_a.to(tl.float32))
-        product_b = _round_fp16_to_fp32(lhs_b.to(tl.float32) * rhs_b.to(tl.float32))
-        return _round_fp16_to_fp32(product_a - product_b)
-    elif tl.constexpr(ELEMENT_TY == tl.bfloat16):
-        product_a = _round_bf16_to_fp32(lhs_a.to(tl.float32) * rhs_a.to(tl.float32))
-        product_b = _round_bf16_to_fp32(lhs_b.to(tl.float32) * rhs_b.to(tl.float32))
-        return _round_bf16_to_fp32(product_a - product_b)
+def _real_cross_component(
+    lhs_a,
+    rhs_a,
+    lhs_b,
+    rhs_b,
+    scratch_ptr,
+    mask,
+    ELEMENT_TY: tl.constexpr,
+):
+    if tl.constexpr(ELEMENT_TY == tl.float16) or tl.constexpr(
+        ELEMENT_TY == tl.bfloat16
+    ):
+        tl.store(scratch_ptr, lhs_a * rhs_a, mask=mask)
+        tl.debug_barrier()
+        product_a = tl.load(scratch_ptr, mask=mask, other=0.0).to(tl.float32)
+        tl.store(scratch_ptr, lhs_b * rhs_b, mask=mask)
+        tl.debug_barrier()
+        product_b = tl.load(scratch_ptr, mask=mask, other=0.0).to(tl.float32)
+        return product_a - product_b
     else:
         return lhs_a * rhs_a - lhs_b * rhs_b
 
@@ -124,6 +99,8 @@ def _linalg_cross_real_kernel(
         other_last,
         input_last,
         other_next,
+        output_ptr + global_offsets,
+        mask,
         input_ptr.dtype.element_ty,
     )
     tl.store(output_ptr + global_offsets, output_values, mask=mask)
@@ -326,9 +303,33 @@ def _linalg_cross_real_strided_kernel(
     )
 
     element_ty = input_ptr.dtype.element_ty
-    output_0 = _real_cross_component(input_1, other_2, input_2, other_1, element_ty)
-    output_1 = _real_cross_component(input_2, other_0, input_0, other_2, element_ty)
-    output_2 = _real_cross_component(input_0, other_1, input_1, other_0, element_ty)
+    output_0 = _real_cross_component(
+        input_1,
+        other_2,
+        input_2,
+        other_1,
+        output_ptr + output_base,
+        mask,
+        element_ty,
+    )
+    output_1 = _real_cross_component(
+        input_2,
+        other_0,
+        input_0,
+        other_2,
+        output_ptr + output_base + OUTPUT_COMPONENT_STRIDE,
+        mask,
+        element_ty,
+    )
+    output_2 = _real_cross_component(
+        input_0,
+        other_1,
+        input_1,
+        other_0,
+        output_ptr + output_base + 2 * OUTPUT_COMPONENT_STRIDE,
+        mask,
+        element_ty,
+    )
     tl.store(output_ptr + output_base, output_0, mask=mask)
     tl.store(
         output_ptr + output_base + OUTPUT_COMPONENT_STRIDE,
@@ -522,6 +523,8 @@ def _linalg_cross_real_lastdim_broadcast_kernel(
         other_last,
         input_last,
         other_next,
+        output_ptr + global_offsets,
+        mask,
         input_ptr.dtype.element_ty,
     )
     tl.store(output_ptr + global_offsets, output_values, mask=mask)
@@ -643,9 +646,33 @@ def _linalg_cross_real_dim1_3d_kernel(
     other_2 = tl.load(other_ptr + other_base + 2 * INNER_SIZE, mask=mask, other=0.0)
 
     element_ty = input_ptr.dtype.element_ty
-    output_0 = _real_cross_component(input_1, other_2, input_2, other_1, element_ty)
-    output_1 = _real_cross_component(input_2, other_0, input_0, other_2, element_ty)
-    output_2 = _real_cross_component(input_0, other_1, input_1, other_0, element_ty)
+    output_0 = _real_cross_component(
+        input_1,
+        other_2,
+        input_2,
+        other_1,
+        output_ptr + output_base,
+        mask,
+        element_ty,
+    )
+    output_1 = _real_cross_component(
+        input_2,
+        other_0,
+        input_0,
+        other_2,
+        output_ptr + output_base + INNER_SIZE,
+        mask,
+        element_ty,
+    )
+    output_2 = _real_cross_component(
+        input_0,
+        other_1,
+        input_1,
+        other_0,
+        output_ptr + output_base + 2 * INNER_SIZE,
+        mask,
+        element_ty,
+    )
     tl.store(output_ptr + output_base, output_0, mask=mask)
     tl.store(
         output_ptr + output_base + INNER_SIZE,
@@ -704,9 +731,33 @@ def _linalg_cross_real_dim1_small_inner_kernel(
     output_base = batches[:, None] * (3 * INNER_SIZE) + inner[None, :]
     output_mask = batch_mask & inner_mask
     element_ty = input_ptr.dtype.element_ty
-    output_0 = _real_cross_component(input_1, other_2, input_2, other_1, element_ty)
-    output_1 = _real_cross_component(input_2, other_0, input_0, other_2, element_ty)
-    output_2 = _real_cross_component(input_0, other_1, input_1, other_0, element_ty)
+    output_0 = _real_cross_component(
+        input_1,
+        other_2,
+        input_2,
+        other_1,
+        output_ptr + output_base,
+        output_mask,
+        element_ty,
+    )
+    output_1 = _real_cross_component(
+        input_2,
+        other_0,
+        input_0,
+        other_2,
+        output_ptr + output_base + INNER_SIZE,
+        output_mask,
+        element_ty,
+    )
+    output_2 = _real_cross_component(
+        input_0,
+        other_1,
+        input_1,
+        other_0,
+        output_ptr + output_base + 2 * INNER_SIZE,
+        output_mask,
+        element_ty,
+    )
     tl.store(output_ptr + output_base, output_0, mask=output_mask)
     tl.store(
         output_ptr + output_base + INNER_SIZE,
