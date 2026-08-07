@@ -37,6 +37,16 @@ def _randn(shape, dtype):
     return torch.randn(shape, dtype=dtype, device=flag_gems.device)
 
 
+def _to_cross_reference(tensor, dtype):
+    reference = utils.to_reference(tensor)
+    if dtype in (torch.float16, torch.bfloat16):
+        # CPU and accelerator linalg_cross implementations use different
+        # low-precision intermediate rounding on some backends. FP32 opmath is
+        # the common, more accurate reference for both execution locations.
+        reference = reference.to(torch.float32)
+    return reference
+
+
 def _assert_cross_close(result, reference, dtype):
     if dtype == torch.complex64:
         # Some backends do not implement isclose/abs for complex tensors.
@@ -82,8 +92,8 @@ def _assert_cross_close(result, reference, dtype):
 def test_linalg_cross(input_shape, other_shape, dim, dtype):
     input = _randn(input_shape, dtype)
     other = _randn(other_shape, dtype)
-    ref_input = utils.to_reference(input)
-    ref_other = utils.to_reference(other)
+    ref_input = _to_cross_reference(input, dtype)
+    ref_other = _to_cross_reference(other, dtype)
 
     ref_out = torch.linalg.cross(ref_input, ref_other, dim=dim)
     with flag_gems.use_gems(include=["linalg_cross"]):
@@ -99,11 +109,11 @@ def test_linalg_cross_noncontiguous_input_and_out(dtype):
     input = _randn((2, 4, 3), dtype).transpose(1, 2)
     other = _randn((1, 4, 3), dtype).transpose(1, 2)
     out = torch.empty((2, 4, 3), dtype=dtype, device=flag_gems.device).transpose(1, 2)
-    ref_input = utils.to_reference(input)
-    ref_other = utils.to_reference(other)
-    ref_out = torch.empty((2, 4, 3), dtype=dtype, device=ref_input.device).transpose(
-        1, 2
-    )
+    ref_input = _to_cross_reference(input, dtype)
+    ref_other = _to_cross_reference(other, dtype)
+    ref_out = torch.empty(
+        (2, 4, 3), dtype=ref_input.dtype, device=ref_input.device
+    ).transpose(1, 2)
     torch.ops.aten.linalg_cross.out(ref_input, ref_other, dim=1, out=ref_out)
     with flag_gems.use_gems(include=["linalg_cross_out"]):
         result = torch.ops.aten.linalg_cross.out(input, other, dim=1, out=out)
