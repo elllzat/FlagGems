@@ -40,57 +40,6 @@ _SUPPORTED_DTYPES = (
 
 
 @triton.jit
-def _round_fp16_rtne(value):
-    bits = value.to(tl.int32, bitcast=True)
-    sign = bits & -2147483648
-    abs_bits = bits & 0x7FFFFFFF
-    abs_value = abs_bits.to(tl.float32, bitcast=True)
-
-    # Adding half an FP16 ULP before an RTZ conversion implements round-to-nearest.
-    # For exact halfway values, lower the bias by one FP32 ULP when the retained
-    # FP16 mantissa is even, which implements ties-to-even.
-    bias_bits = (abs_bits & 0x7F800000) - 0x05800000
-    bias = bias_bits.to(tl.float32, bitcast=True)
-    subnormal_bias_bits = abs_bits * 0 + 0x33000000
-    subnormal_bias = subnormal_bias_bits.to(tl.float32, bitcast=True)
-    bias = tl.where(abs_bits < 0x38800000, subnormal_bias, bias)
-    tie_to_even = ((abs_bits & 0x1FFF) == 0x1000) & (((abs_bits >> 13) & 1) == 0)
-    bias = tl.where(tie_to_even, bias * 0.999755859375, bias)
-
-    rounded = (
-        (abs_value + bias).to(tl.float16, fp_downcast_rounding="rtz").to(tl.float32)
-    )
-    rounded = tl.where(abs_bits >= 0x477FF000, float("inf"), rounded)
-    rounded = tl.where(sign != 0, -rounded, rounded)
-    return tl.where(abs_bits > 0x7F800000, value, rounded)
-
-
-@triton.jit
-def _round_bf16_rtne(value):
-    bits = value.to(tl.int32, bitcast=True)
-    sign = bits & -2147483648
-    abs_bits = bits & 0x7FFFFFFF
-    abs_value = abs_bits.to(tl.float32, bitcast=True)
-
-    # BF16 has seven mantissa bits, so its half-ULP bias is 2^-8 relative to
-    # the source exponent. The exact-halfway correction again enforces RTNE.
-    bias_bits = (abs_bits & 0x7F800000) - 0x04000000
-    bias = bias_bits.to(tl.float32, bitcast=True)
-    subnormal_bias_bits = abs_bits * 0 + 0x00008000
-    subnormal_bias = subnormal_bias_bits.to(tl.float32, bitcast=True)
-    bias = tl.where(abs_bits < 0x00800000, subnormal_bias, bias)
-    tie_to_even = ((abs_bits & 0xFFFF) == 0x8000) & (((abs_bits >> 16) & 1) == 0)
-    bias = tl.where(tie_to_even, bias * 0.99609375, bias)
-
-    rounded = (
-        (abs_value + bias).to(tl.bfloat16, fp_downcast_rounding="rtz").to(tl.float32)
-    )
-    rounded = tl.where(abs_bits >= 0x7F7F8000, float("inf"), rounded)
-    rounded = tl.where(sign != 0, -rounded, rounded)
-    return tl.where(abs_bits > 0x7F800000, value, rounded)
-
-
-@triton.jit
 def _real_cross_component(
     lhs_a,
     rhs_a,
@@ -100,14 +49,15 @@ def _real_cross_component(
     mask,
     ELEMENT_TY: tl.constexpr,
 ):
-    if tl.constexpr(ELEMENT_TY == tl.float16):
-        product_a = _round_fp16_rtne(lhs_a * rhs_a)
-        product_b = _round_fp16_rtne(lhs_b * rhs_b)
-        return _round_fp16_rtne(product_a - product_b)
-    elif tl.constexpr(ELEMENT_TY == tl.bfloat16):
-        product_a = _round_bf16_rtne(lhs_a * rhs_a)
-        product_b = _round_bf16_rtne(lhs_b * rhs_b)
-        return _round_bf16_rtne(product_a - product_b)
+    if tl.constexpr(ELEMENT_TY == tl.float16) or tl.constexpr(
+        ELEMENT_TY == tl.bfloat16
+    ):
+        # Keep both multiplications in the input dtype, then widen their rounded
+        # results before subtraction. This prevents the backend from contracting
+        # the expression while matching PyTorch's low-precision operation order.
+        product_a = (lhs_a * rhs_a).to(tl.float32)
+        product_b = (lhs_b * rhs_b).to(tl.float32)
+        return product_a - product_b
     else:
         return lhs_a * rhs_a - lhs_b * rhs_b
 
