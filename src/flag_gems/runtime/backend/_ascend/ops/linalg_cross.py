@@ -17,6 +17,7 @@ import logging
 import torch
 import triton
 import triton.language as tl
+from triton.language.extra.cann.extension import core as cann_core
 
 from flag_gems.ops.linalg_cross import (
     _get_strided_layout,
@@ -53,11 +54,15 @@ def _real_cross_component(
         ELEMENT_TY == tl.bfloat16
     ):
         tl.store(scratch_ptr, lhs_a * rhs_a, mask=mask)
-        tl.debug_barrier()
-        product_a = tl.load(scratch_ptr, mask=mask, other=0.0).to(tl.float32)
+        cann_core.debug_barrier(cann_core.SYNC_IN_VF.VST_VLD)
+        product_a = tl.load(scratch_ptr, mask=mask, other=0.0, volatile=True).to(
+            tl.float32
+        )
         tl.store(scratch_ptr, lhs_b * rhs_b, mask=mask)
-        tl.debug_barrier()
-        product_b = tl.load(scratch_ptr, mask=mask, other=0.0).to(tl.float32)
+        cann_core.debug_barrier(cann_core.SYNC_IN_VF.VST_VLD)
+        product_b = tl.load(scratch_ptr, mask=mask, other=0.0, volatile=True).to(
+            tl.float32
+        )
         return product_a - product_b
     else:
         return lhs_a * rhs_a - lhs_b * rhs_b
