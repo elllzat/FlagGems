@@ -38,6 +38,29 @@ _FALLBACK_KEYSET = torch._C.DispatchKeySet(
 )
 
 
+@triton.jit
+def _real_cross_component(
+    lhs_a,
+    rhs_a,
+    lhs_b,
+    rhs_b,
+    ELEMENT_TY: tl.constexpr,
+):
+    if tl.constexpr(ELEMENT_TY == tl.float16) or tl.constexpr(
+        ELEMENT_TY == tl.bfloat16
+    ):
+        product_a = (lhs_a.to(tl.float32) * rhs_a.to(tl.float32)).to(
+            ELEMENT_TY, fp_downcast_rounding="rtne"
+        )
+        product_b = (lhs_b.to(tl.float32) * rhs_b.to(tl.float32)).to(
+            ELEMENT_TY, fp_downcast_rounding="rtne"
+        )
+        return (product_a.to(tl.float32) - product_b.to(tl.float32)).to(
+            ELEMENT_TY, fp_downcast_rounding="rtne"
+        )
+    return lhs_a * rhs_a - lhs_b * rhs_b
+
+
 @libentry()
 @triton.jit
 def _linalg_cross_real_kernel(
@@ -60,15 +83,12 @@ def _linalg_cross_real_kernel(
     other_2 = tl.load(other_ptr + offsets + 2, mask=mask, other=0.0)
 
     element_ty = input_ptr.dtype.element_ty
-    product_12 = (input_1 * other_2).to(element_ty)
-    product_21 = (input_2 * other_1).to(element_ty)
-    product_20 = (input_2 * other_0).to(element_ty)
-    product_02 = (input_0 * other_2).to(element_ty)
-    product_01 = (input_0 * other_1).to(element_ty)
-    product_10 = (input_1 * other_0).to(element_ty)
-    tl.store(output_ptr + offsets, product_12 - product_21, mask=mask)
-    tl.store(output_ptr + offsets + 1, product_20 - product_02, mask=mask)
-    tl.store(output_ptr + offsets + 2, product_01 - product_10, mask=mask)
+    output_0 = _real_cross_component(input_1, other_2, input_2, other_1, element_ty)
+    output_1 = _real_cross_component(input_2, other_0, input_0, other_2, element_ty)
+    output_2 = _real_cross_component(input_0, other_1, input_1, other_0, element_ty)
+    tl.store(output_ptr + offsets, output_0, mask=mask)
+    tl.store(output_ptr + offsets + 1, output_1, mask=mask)
+    tl.store(output_ptr + offsets + 2, output_2, mask=mask)
 
 
 @libentry()
@@ -261,21 +281,18 @@ def _linalg_cross_real_strided_kernel(
     )
 
     element_ty = input_ptr.dtype.element_ty
-    product_12 = (input_1 * other_2).to(element_ty)
-    product_21 = (input_2 * other_1).to(element_ty)
-    product_20 = (input_2 * other_0).to(element_ty)
-    product_02 = (input_0 * other_2).to(element_ty)
-    product_01 = (input_0 * other_1).to(element_ty)
-    product_10 = (input_1 * other_0).to(element_ty)
-    tl.store(output_ptr + output_base, product_12 - product_21, mask=mask)
+    output_0 = _real_cross_component(input_1, other_2, input_2, other_1, element_ty)
+    output_1 = _real_cross_component(input_2, other_0, input_0, other_2, element_ty)
+    output_2 = _real_cross_component(input_0, other_1, input_1, other_0, element_ty)
+    tl.store(output_ptr + output_base, output_0, mask=mask)
     tl.store(
         output_ptr + output_base + OUTPUT_COMPONENT_STRIDE,
-        product_20 - product_02,
+        output_1,
         mask=mask,
     )
     tl.store(
         output_ptr + output_base + 2 * OUTPUT_COMPONENT_STRIDE,
-        product_01 - product_10,
+        output_2,
         mask=mask,
     )
 
@@ -493,15 +510,12 @@ def _linalg_cross_real_lastdim_broadcast_kernel(
     other_2 = tl.load(other_ptr + other_base + 2, mask=mask, other=0.0)
 
     element_ty = input_ptr.dtype.element_ty
-    product_12 = (input_1 * other_2).to(element_ty)
-    product_21 = (input_2 * other_1).to(element_ty)
-    product_20 = (input_2 * other_0).to(element_ty)
-    product_02 = (input_0 * other_2).to(element_ty)
-    product_01 = (input_0 * other_1).to(element_ty)
-    product_10 = (input_1 * other_0).to(element_ty)
-    tl.store(output_ptr + output_base, product_12 - product_21, mask=mask)
-    tl.store(output_ptr + output_base + 1, product_20 - product_02, mask=mask)
-    tl.store(output_ptr + output_base + 2, product_01 - product_10, mask=mask)
+    output_0 = _real_cross_component(input_1, other_2, input_2, other_1, element_ty)
+    output_1 = _real_cross_component(input_2, other_0, input_0, other_2, element_ty)
+    output_2 = _real_cross_component(input_0, other_1, input_1, other_0, element_ty)
+    tl.store(output_ptr + output_base, output_0, mask=mask)
+    tl.store(output_ptr + output_base + 1, output_1, mask=mask)
+    tl.store(output_ptr + output_base + 2, output_2, mask=mask)
 
 
 @libentry()
@@ -521,7 +535,14 @@ def _linalg_cross_complex_lastdim_broadcast_kernel(
     other_base = (vectors % OTHER_VECTORS) * 6
     output_base = vectors * 6
 
-    values = _complex_cross_values(
+    (
+        out_0_real,
+        out_0_imag,
+        out_1_real,
+        out_1_imag,
+        out_2_real,
+        out_2_imag,
+    ) = _complex_cross_values(
         tl.load(input_ptr + input_base, mask=mask, other=0.0),
         tl.load(input_ptr + input_base + 1, mask=mask, other=0.0),
         tl.load(input_ptr + input_base + 2, mask=mask, other=0.0),
@@ -535,12 +556,12 @@ def _linalg_cross_complex_lastdim_broadcast_kernel(
         tl.load(other_ptr + other_base + 4, mask=mask, other=0.0),
         tl.load(other_ptr + other_base + 5, mask=mask, other=0.0),
     )
-    tl.store(output_ptr + output_base, values[0], mask=mask)
-    tl.store(output_ptr + output_base + 1, values[1], mask=mask)
-    tl.store(output_ptr + output_base + 2, values[2], mask=mask)
-    tl.store(output_ptr + output_base + 3, values[3], mask=mask)
-    tl.store(output_ptr + output_base + 4, values[4], mask=mask)
-    tl.store(output_ptr + output_base + 5, values[5], mask=mask)
+    tl.store(output_ptr + output_base, out_0_real, mask=mask)
+    tl.store(output_ptr + output_base + 1, out_0_imag, mask=mask)
+    tl.store(output_ptr + output_base + 2, out_1_real, mask=mask)
+    tl.store(output_ptr + output_base + 3, out_1_imag, mask=mask)
+    tl.store(output_ptr + output_base + 4, out_2_real, mask=mask)
+    tl.store(output_ptr + output_base + 5, out_2_imag, mask=mask)
 
 
 @libentry()
@@ -571,21 +592,18 @@ def _linalg_cross_real_dim1_3d_kernel(
     other_2 = tl.load(other_ptr + other_base + 2 * INNER_SIZE, mask=mask, other=0.0)
 
     element_ty = input_ptr.dtype.element_ty
-    product_12 = (input_1 * other_2).to(element_ty)
-    product_21 = (input_2 * other_1).to(element_ty)
-    product_20 = (input_2 * other_0).to(element_ty)
-    product_02 = (input_0 * other_2).to(element_ty)
-    product_01 = (input_0 * other_1).to(element_ty)
-    product_10 = (input_1 * other_0).to(element_ty)
-    tl.store(output_ptr + output_base, product_12 - product_21, mask=mask)
+    output_0 = _real_cross_component(input_1, other_2, input_2, other_1, element_ty)
+    output_1 = _real_cross_component(input_2, other_0, input_0, other_2, element_ty)
+    output_2 = _real_cross_component(input_0, other_1, input_1, other_0, element_ty)
+    tl.store(output_ptr + output_base, output_0, mask=mask)
     tl.store(
         output_ptr + output_base + INNER_SIZE,
-        product_20 - product_02,
+        output_1,
         mask=mask,
     )
     tl.store(
         output_ptr + output_base + 2 * INNER_SIZE,
-        product_01 - product_10,
+        output_2,
         mask=mask,
     )
 
@@ -611,7 +629,14 @@ def _linalg_cross_complex_dim1_3d_kernel(
     output_base = 2 * (batch * (3 * INNER_SIZE) + inner)
     component_stride = 2 * INNER_SIZE
 
-    values = _complex_cross_values(
+    (
+        out_0_real,
+        out_0_imag,
+        out_1_real,
+        out_1_imag,
+        out_2_real,
+        out_2_imag,
+    ) = _complex_cross_values(
         tl.load(input_ptr + input_base, mask=mask, other=0.0),
         tl.load(input_ptr + input_base + 1, mask=mask, other=0.0),
         tl.load(input_ptr + input_base + component_stride, mask=mask, other=0.0),
@@ -633,14 +658,14 @@ def _linalg_cross_complex_dim1_3d_kernel(
             other=0.0,
         ),
     )
-    tl.store(output_ptr + output_base, values[0], mask=mask)
-    tl.store(output_ptr + output_base + 1, values[1], mask=mask)
-    tl.store(output_ptr + output_base + component_stride, values[2], mask=mask)
-    tl.store(output_ptr + output_base + component_stride + 1, values[3], mask=mask)
-    tl.store(output_ptr + output_base + 2 * component_stride, values[4], mask=mask)
+    tl.store(output_ptr + output_base, out_0_real, mask=mask)
+    tl.store(output_ptr + output_base + 1, out_0_imag, mask=mask)
+    tl.store(output_ptr + output_base + component_stride, out_1_real, mask=mask)
+    tl.store(output_ptr + output_base + component_stride + 1, out_1_imag, mask=mask)
+    tl.store(output_ptr + output_base + 2 * component_stride, out_2_real, mask=mask)
     tl.store(
         output_ptr + output_base + 2 * component_stride + 1,
-        values[5],
+        out_2_imag,
         mask=mask,
     )
 

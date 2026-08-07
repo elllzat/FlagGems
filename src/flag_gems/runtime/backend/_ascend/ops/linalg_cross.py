@@ -39,6 +39,29 @@ _SUPPORTED_DTYPES = (
 )
 
 
+@triton.jit
+def _real_cross_component(
+    lhs_a,
+    rhs_a,
+    lhs_b,
+    rhs_b,
+    ELEMENT_TY: tl.constexpr,
+):
+    if tl.constexpr(ELEMENT_TY == tl.float16) or tl.constexpr(
+        ELEMENT_TY == tl.bfloat16
+    ):
+        product_a = (lhs_a.to(tl.float32) * rhs_a.to(tl.float32)).to(
+            ELEMENT_TY, fp_downcast_rounding="rtne"
+        )
+        product_b = (lhs_b.to(tl.float32) * rhs_b.to(tl.float32)).to(
+            ELEMENT_TY, fp_downcast_rounding="rtne"
+        )
+        return (product_a.to(tl.float32) - product_b.to(tl.float32)).to(
+            ELEMENT_TY, fp_downcast_rounding="rtne"
+        )
+    return lhs_a * rhs_a - lhs_b * rhs_b
+
+
 @libentry()
 @triton.jit
 def _linalg_cross_real_kernel(
@@ -70,9 +93,13 @@ def _linalg_cross_real_kernel(
     other_next = tl.gather(other_values, next_offsets, axis=0)
     other_last = tl.gather(other_values, last_offsets, axis=0)
 
-    product_next_last = input_next.to(tl.float32) * other_last.to(tl.float32)
-    product_last_next = input_last.to(tl.float32) * other_next.to(tl.float32)
-    output_values = product_next_last - product_last_next
+    output_values = _real_cross_component(
+        input_next,
+        other_last,
+        input_last,
+        other_next,
+        input_ptr.dtype.element_ty,
+    )
     tl.store(output_ptr + global_offsets, output_values, mask=mask)
 
 
@@ -272,21 +299,19 @@ def _linalg_cross_real_strided_kernel(
         other_ptr + other_base + 2 * OTHER_COMPONENT_STRIDE, mask=mask, other=0.0
     )
 
-    product_12 = input_1.to(tl.float32) * other_2.to(tl.float32)
-    product_21 = input_2.to(tl.float32) * other_1.to(tl.float32)
-    product_20 = input_2.to(tl.float32) * other_0.to(tl.float32)
-    product_02 = input_0.to(tl.float32) * other_2.to(tl.float32)
-    product_01 = input_0.to(tl.float32) * other_1.to(tl.float32)
-    product_10 = input_1.to(tl.float32) * other_0.to(tl.float32)
-    tl.store(output_ptr + output_base, product_12 - product_21, mask=mask)
+    element_ty = input_ptr.dtype.element_ty
+    output_0 = _real_cross_component(input_1, other_2, input_2, other_1, element_ty)
+    output_1 = _real_cross_component(input_2, other_0, input_0, other_2, element_ty)
+    output_2 = _real_cross_component(input_0, other_1, input_1, other_0, element_ty)
+    tl.store(output_ptr + output_base, output_0, mask=mask)
     tl.store(
         output_ptr + output_base + OUTPUT_COMPONENT_STRIDE,
-        product_20 - product_02,
+        output_1,
         mask=mask,
     )
     tl.store(
         output_ptr + output_base + 2 * OUTPUT_COMPONENT_STRIDE,
-        product_01 - product_10,
+        output_2,
         mask=mask,
     )
 
@@ -466,9 +491,13 @@ def _linalg_cross_real_lastdim_broadcast_kernel(
     other_next = tl.gather(other_values, next_offsets, axis=0)
     other_last = tl.gather(other_values, last_offsets, axis=0)
 
-    product_next_last = input_next.to(tl.float32) * other_last.to(tl.float32)
-    product_last_next = input_last.to(tl.float32) * other_next.to(tl.float32)
-    output_values = product_next_last - product_last_next
+    output_values = _real_cross_component(
+        input_next,
+        other_last,
+        input_last,
+        other_next,
+        input_ptr.dtype.element_ty,
+    )
     tl.store(output_ptr + global_offsets, output_values, mask=mask)
 
 
@@ -587,21 +616,19 @@ def _linalg_cross_real_dim1_3d_kernel(
     other_1 = tl.load(other_ptr + other_base + INNER_SIZE, mask=mask, other=0.0)
     other_2 = tl.load(other_ptr + other_base + 2 * INNER_SIZE, mask=mask, other=0.0)
 
-    product_12 = input_1.to(tl.float32) * other_2.to(tl.float32)
-    product_21 = input_2.to(tl.float32) * other_1.to(tl.float32)
-    product_20 = input_2.to(tl.float32) * other_0.to(tl.float32)
-    product_02 = input_0.to(tl.float32) * other_2.to(tl.float32)
-    product_01 = input_0.to(tl.float32) * other_1.to(tl.float32)
-    product_10 = input_1.to(tl.float32) * other_0.to(tl.float32)
-    tl.store(output_ptr + output_base, product_12 - product_21, mask=mask)
+    element_ty = input_ptr.dtype.element_ty
+    output_0 = _real_cross_component(input_1, other_2, input_2, other_1, element_ty)
+    output_1 = _real_cross_component(input_2, other_0, input_0, other_2, element_ty)
+    output_2 = _real_cross_component(input_0, other_1, input_1, other_0, element_ty)
+    tl.store(output_ptr + output_base, output_0, mask=mask)
     tl.store(
         output_ptr + output_base + INNER_SIZE,
-        product_20 - product_02,
+        output_1,
         mask=mask,
     )
     tl.store(
         output_ptr + output_base + 2 * INNER_SIZE,
-        product_01 - product_10,
+        output_2,
         mask=mask,
     )
 
@@ -650,21 +677,19 @@ def _linalg_cross_real_dim1_small_inner_kernel(
 
     output_base = batches[:, None] * (3 * INNER_SIZE) + inner[None, :]
     output_mask = batch_mask & inner_mask
-    product_12 = input_1.to(tl.float32) * other_2.to(tl.float32)
-    product_21 = input_2.to(tl.float32) * other_1.to(tl.float32)
-    product_20 = input_2.to(tl.float32) * other_0.to(tl.float32)
-    product_02 = input_0.to(tl.float32) * other_2.to(tl.float32)
-    product_01 = input_0.to(tl.float32) * other_1.to(tl.float32)
-    product_10 = input_1.to(tl.float32) * other_0.to(tl.float32)
-    tl.store(output_ptr + output_base, product_12 - product_21, mask=output_mask)
+    element_ty = input_ptr.dtype.element_ty
+    output_0 = _real_cross_component(input_1, other_2, input_2, other_1, element_ty)
+    output_1 = _real_cross_component(input_2, other_0, input_0, other_2, element_ty)
+    output_2 = _real_cross_component(input_0, other_1, input_1, other_0, element_ty)
+    tl.store(output_ptr + output_base, output_0, mask=output_mask)
     tl.store(
         output_ptr + output_base + INNER_SIZE,
-        product_20 - product_02,
+        output_1,
         mask=output_mask,
     )
     tl.store(
         output_ptr + output_base + 2 * INNER_SIZE,
-        product_01 - product_10,
+        output_2,
         mask=output_mask,
     )
 

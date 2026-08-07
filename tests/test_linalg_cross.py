@@ -38,9 +38,9 @@ def _randn(shape, dtype):
 
 
 def _assert_cross_close(result, reference, dtype):
-    if flag_gems.vendor_name == "ascend" and dtype == torch.complex64:
-        # aclnnIsClose does not accept complex64. Compare the real-valued view
-        # on NPU so validation does not fall back to CPU.
+    if dtype == torch.complex64:
+        # Some backends do not implement isclose/abs for complex tensors.
+        # Compare the real-valued view without changing the reference device.
         utils.gems_assert_close(
             torch.view_as_real(result),
             torch.view_as_real(reference),
@@ -48,7 +48,12 @@ def _assert_cross_close(result, reference, dtype):
         )
     elif dtype == torch.complex128:
         result = utils.to_cpu(result, reference)
-        torch.testing.assert_close(result, reference, rtol=1e-10, atol=1e-10)
+        torch.testing.assert_close(
+            torch.view_as_real(result),
+            torch.view_as_real(reference),
+            rtol=1e-10,
+            atol=1e-10,
+        )
     elif dtype == torch.float16:
         utils.gems_assert_close(result, reference, dtype, atol=1e-3)
     elif dtype == torch.bfloat16:
