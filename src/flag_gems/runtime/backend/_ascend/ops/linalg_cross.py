@@ -50,9 +50,10 @@ def _real_cross_component(
     if tl.constexpr(ELEMENT_TY == tl.float16) or tl.constexpr(
         ELEMENT_TY == tl.bfloat16
     ):
-        return lhs_a.to(tl.float32) * rhs_a.to(tl.float32) - lhs_b.to(
-            tl.float32
-        ) * rhs_b.to(tl.float32)
+        return (
+            lhs_a.to(tl.float32) * rhs_a.to(tl.float32)
+            - lhs_b.to(tl.float32) * rhs_b.to(tl.float32)
+        ).to(ELEMENT_TY, fp_downcast_rounding="rtne")
     return lhs_a * rhs_a - lhs_b * rhs_b
 
 
