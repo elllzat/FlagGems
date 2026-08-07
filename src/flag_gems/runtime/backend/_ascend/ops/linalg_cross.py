@@ -41,37 +41,35 @@ _SUPPORTED_DTYPES = (
 
 @triton.jit
 def _round_fp16_to_fp32(value):
-    bits = value.to(tl.uint32, bitcast=True)
-    sign = bits & 0x80000000
+    bits = value.to(tl.int32, bitcast=True)
+    sign = bits & -2147483648
     abs_bits = bits & 0x7FFFFFFF
     abs_value = abs_bits.to(tl.float32, bitcast=True)
 
     rounded_bits = abs_bits + 0xFFF + ((abs_bits >> 13) & 1)
-    rounded_bits &= 0xFFFFE000
+    rounded_bits &= -8192
     rounded_bits = tl.where(rounded_bits >= 0x47800000, 0x7F800000, rounded_bits)
     normal_value = rounded_bits.to(tl.float32, bitcast=True)
 
     scaled = tl.minimum(abs_value * 16777216.0, 1024.0)
-    base = scaled.to(tl.uint32)
+    base = scaled.to(tl.int32)
     fraction = scaled - base.to(tl.float32)
     round_up = (fraction > 0.5) | ((fraction == 0.5) & ((base & 1) != 0))
-    subnormal_value = (base + round_up.to(tl.uint32)).to(tl.float32) * (
-        1.0 / 16777216.0
-    )
+    subnormal_value = (base + round_up.to(tl.int32)).to(tl.float32) * (1.0 / 16777216.0)
 
     rounded_abs = tl.where(abs_value < (1.0 / 16384.0), subnormal_value, normal_value)
     rounded_abs = tl.where(abs_bits >= 0x7F800000, abs_value, rounded_abs)
-    rounded_abs_bits = rounded_abs.to(tl.uint32, bitcast=True)
+    rounded_abs_bits = rounded_abs.to(tl.int32, bitcast=True)
     return (rounded_abs_bits | sign).to(tl.float32, bitcast=True)
 
 
 @triton.jit
 def _round_bf16_to_fp32(value):
-    bits = value.to(tl.uint32, bitcast=True)
-    sign = bits & 0x80000000
+    bits = value.to(tl.int32, bitcast=True)
+    sign = bits & -2147483648
     abs_bits = bits & 0x7FFFFFFF
     rounded_bits = abs_bits + 0x7FFF + ((abs_bits >> 16) & 1)
-    rounded_bits &= 0xFFFF0000
+    rounded_bits &= -65536
     rounded_bits = tl.where(abs_bits >= 0x7F800000, abs_bits, rounded_bits)
     return (rounded_bits | sign).to(tl.float32, bitcast=True)
 
