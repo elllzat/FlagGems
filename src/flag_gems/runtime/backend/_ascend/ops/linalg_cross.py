@@ -82,11 +82,12 @@ def _real_cross_component(lhs_a, rhs_a, lhs_b, rhs_b, ELEMENT_TY: tl.constexpr):
         product_a = _round_fp16_to_fp32(lhs_a.to(tl.float32) * rhs_a.to(tl.float32))
         product_b = _round_fp16_to_fp32(lhs_b.to(tl.float32) * rhs_b.to(tl.float32))
         return _round_fp16_to_fp32(product_a - product_b)
-    if tl.constexpr(ELEMENT_TY == tl.bfloat16):
+    elif tl.constexpr(ELEMENT_TY == tl.bfloat16):
         product_a = _round_bf16_to_fp32(lhs_a.to(tl.float32) * rhs_a.to(tl.float32))
         product_b = _round_bf16_to_fp32(lhs_b.to(tl.float32) * rhs_b.to(tl.float32))
         return _round_bf16_to_fp32(product_a - product_b)
-    return lhs_a * rhs_a - lhs_b * rhs_b
+    else:
+        return lhs_a * rhs_a - lhs_b * rhs_b
 
 
 @libentry()
