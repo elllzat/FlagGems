@@ -11,8 +11,12 @@ from flag_gems.utils.codegen_config_utils import CodeGenConfig
 
 logger = logging.getLogger(__name__)
 
+# CANN 9.0 enables automatic multi-buffering. Larger tiles make this kernel
+# exceed the 192 KiB unified-buffer capacity on Ascend 910B.
+_ASCEND_UB_SAFE_TILE_SIZE = 512
+
 _LOG_SIGMOID_BACKWARD_CONFIG = CodeGenConfig(
-    max_tile_size=4096,
+    max_tile_size=_ASCEND_UB_SAFE_TILE_SIZE,
     max_grid_size=(65535, 1, 1),
     max_num_warps_per_cta=32,
     prefer_block_pointer=False,
@@ -77,7 +81,7 @@ def _launch_contiguous_kernel(grad_output, self, grad_input):
     if n_elements == 0:
         return grad_input
 
-    block_size = 8192
+    block_size = _ASCEND_UB_SAFE_TILE_SIZE
     tile_count = triton.cdiv(n_elements, block_size)
     grid_size = min(tile_count, 65535)
     tiles_per_program = triton.cdiv(tile_count, grid_size)

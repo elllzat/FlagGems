@@ -12,7 +12,6 @@ from .fill import fill_scalar, fill_scalar_, fill_tensor, fill_tensor_
 from .gelu import gelu, gelu_
 from .hadamard_transform import hadamard_transform
 from .isin import isin
-from .log_sigmoid import log_sigmoid_backward, log_sigmoid_backward_out
 from .matmul_bf16 import matmul_bf16
 from .matmul_int8 import matmul_int8
 from .mm import mm
@@ -49,8 +48,6 @@ __all__ = [
     "gelu_",
     "hadamard_transform",
     "isin",
-    "log_sigmoid_backward",
-    "log_sigmoid_backward_out",
     "matmul_bf16",
     "matmul_int8",
     "mul",

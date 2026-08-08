@@ -55,6 +55,38 @@ def test_log_sigmoid_backward(shape, dtype):
 
 
 @pytest.mark.log_sigmoid_backward_out
+@pytest.mark.parametrize("shape", utils.POINTWISE_SHAPES)
+@pytest.mark.parametrize("dtype", utils.FLOAT_DTYPES)
+def test_log_sigmoid_backward_out(shape, dtype):
+    res_inp = torch.randn(shape, dtype=dtype, device=flag_gems.device)
+    res_grad = torch.randn_like(res_inp)
+    if len(shape) == 1:
+        special_inputs = torch.tensor(
+            SPECIAL_VALUES + [0.0], dtype=dtype, device=flag_gems.device
+        )
+        res_inp = torch.cat((res_inp, special_inputs))
+        res_grad = torch.cat((res_grad, torch.randn_like(special_inputs)))
+
+    ref_inp = utils.to_reference(res_inp, True)
+    ref_grad = utils.to_reference(res_grad, True)
+    ref_buffer = torch.exp(-torch.abs(ref_inp))
+    ref_grad_input = torch.empty_like(ref_inp)
+    torch.ops.aten.log_sigmoid_backward.grad_input(
+        ref_grad, ref_inp, ref_buffer, grad_input=ref_grad_input
+    )
+
+    res_buffer = torch.empty(0, dtype=dtype, device=flag_gems.device)
+    res_grad_input = torch.empty_like(res_inp)
+    with flag_gems.use_gems(include=["log_sigmoid_backward_out"]):
+        result = torch.ops.aten.log_sigmoid_backward.grad_input(
+            res_grad, res_inp, res_buffer, grad_input=res_grad_input
+        )
+
+    assert result is res_grad_input
+    utils.gems_assert_close(res_grad_input, ref_grad_input, dtype)
+
+
+@pytest.mark.log_sigmoid_backward_out
 @pytest.mark.parametrize("dtype", utils.FLOAT_DTYPES)
 def test_log_sigmoid_backward_out_noncontiguous(dtype):
     res_inp = torch.randn((4, 3), dtype=dtype, device=flag_gems.device).T
