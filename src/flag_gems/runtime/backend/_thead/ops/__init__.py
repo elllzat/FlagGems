@@ -11,7 +11,3 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-from .linalg_cross import linalg_cross, linalg_cross_out
-
-__all__ = ["linalg_cross", "linalg_cross_out"]
