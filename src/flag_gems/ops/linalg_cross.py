@@ -530,7 +530,14 @@ def _linalg_cross_complex_lastdim_broadcast_kernel(
     other_base = (vectors % OTHER_VECTORS) * 6
     output_base = vectors * 6
 
-    values = _complex_cross_values(
+    (
+        out_0_real,
+        out_0_imag,
+        out_1_real,
+        out_1_imag,
+        out_2_real,
+        out_2_imag,
+    ) = _complex_cross_values(
         tl.load(input_ptr + input_base, mask=mask, other=0.0),
         tl.load(input_ptr + input_base + 1, mask=mask, other=0.0),
         tl.load(input_ptr + input_base + 2, mask=mask, other=0.0),
@@ -544,12 +551,12 @@ def _linalg_cross_complex_lastdim_broadcast_kernel(
         tl.load(other_ptr + other_base + 4, mask=mask, other=0.0),
         tl.load(other_ptr + other_base + 5, mask=mask, other=0.0),
     )
-    tl.store(output_ptr + output_base, values[0], mask=mask)
-    tl.store(output_ptr + output_base + 1, values[1], mask=mask)
-    tl.store(output_ptr + output_base + 2, values[2], mask=mask)
-    tl.store(output_ptr + output_base + 3, values[3], mask=mask)
-    tl.store(output_ptr + output_base + 4, values[4], mask=mask)
-    tl.store(output_ptr + output_base + 5, values[5], mask=mask)
+    tl.store(output_ptr + output_base, out_0_real, mask=mask)
+    tl.store(output_ptr + output_base + 1, out_0_imag, mask=mask)
+    tl.store(output_ptr + output_base + 2, out_1_real, mask=mask)
+    tl.store(output_ptr + output_base + 3, out_1_imag, mask=mask)
+    tl.store(output_ptr + output_base + 4, out_2_real, mask=mask)
+    tl.store(output_ptr + output_base + 5, out_2_imag, mask=mask)
 
 
 @libentry()
@@ -617,7 +624,14 @@ def _linalg_cross_complex_dim1_3d_kernel(
     output_base = 2 * (batch * (3 * INNER_SIZE) + inner)
     component_stride = 2 * INNER_SIZE
 
-    values = _complex_cross_values(
+    (
+        out_0_real,
+        out_0_imag,
+        out_1_real,
+        out_1_imag,
+        out_2_real,
+        out_2_imag,
+    ) = _complex_cross_values(
         tl.load(input_ptr + input_base, mask=mask, other=0.0),
         tl.load(input_ptr + input_base + 1, mask=mask, other=0.0),
         tl.load(input_ptr + input_base + component_stride, mask=mask, other=0.0),
@@ -639,14 +653,14 @@ def _linalg_cross_complex_dim1_3d_kernel(
             other=0.0,
         ),
     )
-    tl.store(output_ptr + output_base, values[0], mask=mask)
-    tl.store(output_ptr + output_base + 1, values[1], mask=mask)
-    tl.store(output_ptr + output_base + component_stride, values[2], mask=mask)
-    tl.store(output_ptr + output_base + component_stride + 1, values[3], mask=mask)
-    tl.store(output_ptr + output_base + 2 * component_stride, values[4], mask=mask)
+    tl.store(output_ptr + output_base, out_0_real, mask=mask)
+    tl.store(output_ptr + output_base + 1, out_0_imag, mask=mask)
+    tl.store(output_ptr + output_base + component_stride, out_1_real, mask=mask)
+    tl.store(output_ptr + output_base + component_stride + 1, out_1_imag, mask=mask)
+    tl.store(output_ptr + output_base + 2 * component_stride, out_2_real, mask=mask)
     tl.store(
         output_ptr + output_base + 2 * component_stride + 1,
-        values[5],
+        out_2_imag,
         mask=mask,
     )
 
