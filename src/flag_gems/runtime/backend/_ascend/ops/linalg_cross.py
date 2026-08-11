@@ -946,7 +946,7 @@ def _launch_dim1_small_inner_kernel(input, other, output):
         )
 
 
-def _linalg_cross_impl(input, other, dim):
+def _linalg_cross_impl(input, other, dim, output=None):
     if input.dtype not in _SUPPORTED_DTYPES or other.dtype not in _SUPPORTED_DTYPES:
         raise RuntimeError(
             "linalg_cross on Ascend only supports float16, float32, bfloat16, "
@@ -957,30 +957,34 @@ def _linalg_cross_impl(input, other, dim):
     other = _resolve_view(other)
 
     if input.ndim <= 3:
+        if output is None:
+            if input.shape == output_shape and input.is_contiguous():
+                output = torch.empty_like(input)
+            elif other.shape == output_shape and other.is_contiguous():
+                output = torch.empty_like(other)
+            else:
+                output = torch.empty(
+                    output_shape, dtype=input.dtype, device=input.device
+                )
+
         fast_contiguous = (
             dim == input.ndim - 1
             and input.shape == output_shape
             and other.shape == output_shape
             and input.is_contiguous()
             and other.is_contiguous()
+            and output.is_contiguous()
         )
         if fast_contiguous:
-            output = torch.empty_like(input)
             _launch_linalg_cross_kernel(input, other, output, dim)
             return output
-
-        if input.shape == output_shape and input.is_contiguous():
-            output = torch.empty_like(input)
-        elif other.shape == output_shape and other.is_contiguous():
-            output = torch.empty_like(other)
-        else:
-            output = torch.empty(output_shape, dtype=input.dtype, device=input.device)
 
         if (
             input.ndim == 2
             and dim == 1
             and input.is_contiguous()
             and other.is_contiguous()
+            and output.is_contiguous()
         ):
             _launch_lastdim_broadcast_kernel(input, other, output)
             return output
@@ -992,6 +996,7 @@ def _linalg_cross_impl(input, other, dim):
             and other.is_contiguous()
             and input.shape[2] == output.shape[2]
             and other.shape[2] == output.shape[2]
+            and output.is_contiguous()
         ):
             if output.shape[2] <= 16:
                 if output.is_complex():
@@ -1022,7 +1027,11 @@ def _linalg_cross_impl(input, other, dim):
     input_moved, other_moved, output_dim = _prepare_inputs(input, other, dim)
     output_moved = torch.empty_like(input_moved)
     _launch_linalg_cross_kernel(input_moved, other_moved, output_moved, -1)
-    return output_moved.movedim(-1, output_dim).contiguous()
+    result = output_moved.movedim(-1, output_dim).contiguous()
+    if output is not None:
+        output.copy_(result)
+        return output
+    return result
 
 
 def linalg_cross(input, other, *, dim=-1):
@@ -1036,14 +1045,18 @@ def linalg_cross_out(input, other, *, dim=-1, out):
         raise RuntimeError(
             "linalg_cross: out must not share memory with either input tensor"
         )
-    result = _linalg_cross_impl(input, other, dim)
-    if out.dtype != result.dtype:
+    if input.dtype not in _SUPPORTED_DTYPES or other.dtype not in _SUPPORTED_DTYPES:
         raise RuntimeError(
-            f"linalg_cross: expected out dtype {result.dtype}, but got {out.dtype}"
+            "linalg_cross on Ascend only supports float16, float32, bfloat16, "
+            "and complex64"
         )
-    if out.device != result.device:
+    dim, output_shape = _validate_inputs(input, other, dim)
+    if out.dtype != input.dtype:
+        raise RuntimeError(
+            f"linalg_cross: expected out dtype {input.dtype}, but got {out.dtype}"
+        )
+    if out.device != input.device:
         raise RuntimeError("linalg_cross: out must be on the same device as input")
-    if out.shape != result.shape:
-        out.resize_(result.shape)
-    out.copy_(result)
-    return out
+    if out.shape != output_shape:
+        out.resize_(output_shape)
+    return _linalg_cross_impl(input, other, dim, output=out)
