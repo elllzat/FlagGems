@@ -74,7 +74,6 @@ def _assert_cross_close(result, reference, dtype):
 
 
 @pytest.mark.linalg_cross
-@pytest.mark.skipif(not DEVICE_AVAILABLE, reason=DEVICE_REASON)
 @pytest.mark.parametrize("dtype", SUPPORTED_DTYPES)
 @pytest.mark.parametrize(
     "input_shape,other_shape,dim",

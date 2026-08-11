@@ -5,7 +5,7 @@ import torch
 
 import flag_gems
 
-from . import base
+from . import base, consts
 
 # Mirror the layouts covered by tests/test_linalg_cross.py at the smallest
 # performance scale that clears fixed kernel-launch overhead on each backend.
@@ -40,6 +40,19 @@ class LinalgCrossBenchmark(base.Benchmark):
             yield input, other, {"dim": dim}
 
 
+class LinalgCrossOutBenchmark(LinalgCrossBenchmark):
+    def get_input_iter(self, cur_dtype) -> Generator:
+        for input_shape, other_shape, dim in self.shapes:
+            input = _randn(input_shape, cur_dtype, self.device)
+            other = _randn(other_shape, cur_dtype, self.device)
+            out = torch.empty(
+                torch.broadcast_shapes(input_shape, other_shape),
+                dtype=cur_dtype,
+                device=self.device,
+            )
+            yield input, other, {"dim": dim, "out": out}
+
+
 @pytest.mark.linalg_cross
 def test_linalg_cross():
     bench = LinalgCrossBenchmark(
@@ -48,6 +61,19 @@ def test_linalg_cross():
         gems_op=flag_gems.linalg_cross if flag_gems.vendor_name == "ascend" else None,
         # Final performance is the arithmetic mean of the per-shape averages
         # for FP16, FP32, and BF16.
-        dtypes=[torch.float16, torch.float32, torch.bfloat16],
+        dtypes=consts.FLOAT_DTYPES,
+    )
+    bench.run()
+
+
+@pytest.mark.linalg_cross_out
+def test_linalg_cross_out():
+    bench = LinalgCrossOutBenchmark(
+        op_name="linalg_cross_out",
+        torch_op=torch.ops.aten.linalg_cross.out,
+        gems_op=(
+            flag_gems.linalg_cross_out if flag_gems.vendor_name == "ascend" else None
+        ),
+        dtypes=consts.FLOAT_DTYPES,
     )
     bench.run()
