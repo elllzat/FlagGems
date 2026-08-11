@@ -11,7 +11,3 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-from .rnn_tanh import rnn_tanh, rnn_tanh_data
-
-__all__ = ["rnn_tanh", "rnn_tanh_data"]

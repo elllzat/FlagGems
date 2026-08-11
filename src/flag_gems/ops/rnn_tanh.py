@@ -2875,6 +2875,11 @@ def rnn_tanh(
     training dropout, and pure-Triton backward.
     """
     logger.debug("GEMS RNN_TANH")
+    prefer_persistent_dot = runtime.device.vendor_name in (
+        "nvidia",
+        "thead",
+        "hygon",
+    )
     return _rnn_tanh_impl(
         input,
         hx,
@@ -2885,7 +2890,7 @@ def rnn_tanh(
         train,
         bidirectional,
         batch_first,
-        prefer_persistent_dot=runtime.device.vendor_name == "nvidia",
+        prefer_persistent_dot=prefer_persistent_dot,
     )
 
 
