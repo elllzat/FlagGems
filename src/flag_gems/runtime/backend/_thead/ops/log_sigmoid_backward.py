@@ -1,3 +1,17 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import logging
 
 import triton
@@ -7,12 +21,6 @@ from flag_gems.runtime import torch_device_fn
 from flag_gems.utils import pointwise_dynamic
 
 logger = logging.getLogger(__name__)
-
-
-@pointwise_dynamic(is_tensor=[True], promotion_methods=[(0, "DEFAULT")])
-@triton.jit
-def log_sigmoid_forward(x):
-    return tl.minimum(x, 0.0) - tl.log(1.0 + tl.exp(-tl.abs(x).to(tl.float32)))
 
 
 @pointwise_dynamic(is_tensor=[True, True], promotion_methods=[(0, 1, "DEFAULT")])
@@ -78,12 +86,6 @@ def _launch_contiguous_kernel(grad_output, self, buffer, grad_input):
             BLOCK_SIZE=block_size,
         )
     return grad_input
-
-
-def log_sigmoid(x):
-    logger.debug("GEMS LOG_SIGMOID FORWARD")
-
-    return log_sigmoid_forward(x)
 
 
 def log_sigmoid_backward(grad_output, self, buffer):
