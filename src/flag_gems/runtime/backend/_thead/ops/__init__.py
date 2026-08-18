@@ -78,7 +78,7 @@ __all__ = [
     "log_normal_heur_block",
     "log_normal_heur_num_warps",
     "log_sigmoid_backward", 
-    "log_sigmoid_backward_out"
+    "log_sigmoid_backward_out",
     "make_3d_for_bn",
     "nll_loss_backward",
     "nonzero_numpy",
