@@ -37,6 +37,16 @@ _LOG_SIGMOID_BACKWARD_CONFIG = CodeGenConfig(
     prefer_1d_tile=True,
 )
 
+# Buffer reuse removes the exponential and its large temporary footprint, so this
+# memory-bound path can safely use a wider tile than the recompute path.
+_LOG_SIGMOID_BACKWARD_BUFFER_CONFIG = CodeGenConfig(
+    max_tile_size=2048,
+    max_grid_size=(65535, 1, 1),
+    max_num_warps_per_cta=32,
+    prefer_block_pointer=False,
+    prefer_1d_tile=True,
+)
+
 
 @pointwise_dynamic(
     is_tensor=[True, True],
@@ -54,7 +64,7 @@ def log_sigmoid_backward_kernel(grad_output, self):
 @pointwise_dynamic(
     is_tensor=[True, True, True],
     promotion_methods=[(0, 1, "DEFAULT")],
-    config=_LOG_SIGMOID_BACKWARD_CONFIG,
+    config=_LOG_SIGMOID_BACKWARD_BUFFER_CONFIG,
 )
 @triton.jit
 def log_sigmoid_backward_buffer_kernel(grad_output, self, buffer):
