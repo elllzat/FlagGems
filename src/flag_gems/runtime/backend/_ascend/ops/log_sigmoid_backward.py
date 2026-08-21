@@ -40,7 +40,7 @@ _LOG_SIGMOID_BACKWARD_CONFIG = CodeGenConfig(
 # Buffer reuse removes the exponential and its large temporary footprint, so this
 # memory-bound path can safely use a wider tile than the recompute path.
 _LOG_SIGMOID_BACKWARD_BUFFER_CONFIG = CodeGenConfig(
-    max_tile_size=2048,
+    max_tile_size=4096,
     max_grid_size=(65535, 1, 1),
     max_num_warps_per_cta=32,
     prefer_block_pointer=False,
