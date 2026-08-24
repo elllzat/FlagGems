@@ -379,6 +379,90 @@ def rnn_tanh_recurrent_ascend_kernel(
 
 @libentry()
 @triton.jit
+def rnn_tanh_recurrent_vector_ascend_kernel(
+    hx_ptr,
+    weight_hh_ptr,
+    linear_ptr,
+    output_ptr,
+    hidden_ptr,
+    time_index,
+    batch_size,
+    hidden_size,
+    hx_stride_state,
+    hx_stride_b,
+    hx_stride_h,
+    weight_hh_stride_h0,
+    weight_hh_stride_h1,
+    output_feature_size,
+    state_index,
+    direction: tl.constexpr,
+    FIRST_STEP: tl.constexpr,
+    FINAL_STEP: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    """Compute one recurrent step with vector reductions across many programs."""
+    batch_index = tl.program_id(0)
+    n_offs = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
+    k_offs = tl.arange(0, BLOCK_K)
+    n_mask = n_offs < hidden_size
+    acc = tl.zeros([BLOCK_N], dtype=tl.float32)
+
+    for k_start in range(0, hidden_size, BLOCK_K):
+        ks = k_start + k_offs
+        k_mask = ks < hidden_size
+        if FIRST_STEP:
+            previous = tl.load(
+                hx_ptr
+                + state_index * hx_stride_state
+                + batch_index * hx_stride_b
+                + ks * hx_stride_h,
+                mask=k_mask,
+                other=0.0,
+            ).to(tl.float32)
+        else:
+            previous_time = time_index - 1 if direction == 0 else time_index + 1
+            previous = tl.load(
+                output_ptr
+                + (previous_time * batch_size + batch_index) * output_feature_size
+                + direction * hidden_size
+                + ks,
+                mask=k_mask,
+                other=0.0,
+            ).to(tl.float32)
+        weight = tl.load(
+            weight_hh_ptr
+            + n_offs[:, None] * weight_hh_stride_h0
+            + ks[None, :] * weight_hh_stride_h1,
+            mask=n_mask[:, None] & k_mask[None, :],
+            other=0.0,
+        ).to(tl.float32)
+        acc += tl.sum(weight * previous[None, :], axis=1)
+
+    row = time_index * batch_size + batch_index
+    acc += tl.load(
+        linear_ptr + row * hidden_size + n_offs,
+        mask=n_mask,
+        other=0.0,
+    ).to(tl.float32)
+    current = 2.0 / (1.0 + tl.exp(-2.0 * acc)) - 1.0
+    tl.store(
+        output_ptr + row * output_feature_size + direction * hidden_size + n_offs,
+        current,
+        mask=n_mask,
+    )
+    if FINAL_STEP:
+        tl.store(
+            hidden_ptr
+            + (state_index * batch_size + batch_index) * hidden_size
+            + n_offs,
+            current,
+            mask=n_mask,
+        )
+
+
+@libentry()
+@triton.jit
 def rnn_tanh_recurrent_persistent_kernel(
     hx_ptr,
     weight_hh_ptr,
@@ -1879,7 +1963,8 @@ def _launch_forward(
                     num_stages=launch_stages,
                 )
             elif use_ascend_tiled:
-                if hidden_read is None:
+                use_ascend_vector_steps = hidden_size <= 128
+                if not use_ascend_vector_steps and hidden_read is None:
                     hidden_read = _empty((batch_size, hidden_size), input)
                 rows = seq_len * batch_size
                 input_linear = _empty((seq_len, batch_size, hidden_size), input)
@@ -1915,43 +2000,19 @@ def _launch_forward(
                     num_warps=1,
                     num_stages=1,
                 )
-                recurrent_grid = (
-                    triton.cdiv(batch_size, block_m),
-                    triton.cdiv(hidden_size, block_n),
-                )
-                compiled_middle = None
-                direct_grid = (*recurrent_grid, 1)
-                for step in range(seq_len):
-                    time_index = step if direction == 0 else seq_len - 1 - step
-                    # LibEntry rebuilds the launch key for every recurrent step.
-                    # Step 2 has the reusable middle-step specialization (unlike
-                    # the 0/1 scalar-specialized launches), so subsequent middle
-                    # steps can invoke that same compiled FlagGems kernel directly.
-                    if compiled_middle is not None and step < seq_len - 1:
-                        compiled_middle[direct_grid](
+                if use_ascend_vector_steps:
+                    recurrent_block_n = 32
+                    recurrent_block_k = 32
+                    recurrent_grid = (
+                        batch_size,
+                        triton.cdiv(hidden_size, recurrent_block_n),
+                    )
+                    for step in range(seq_len):
+                        time_index = step if direction == 0 else seq_len - 1 - step
+                        rnn_tanh_recurrent_vector_ascend_kernel[recurrent_grid](
                             hx,
                             weight_hh,
-                            bias_hh,
                             input_linear,
-                            hidden_read,
-                            layer_output,
-                            hidden,
-                            time_index,
-                            *hx.stride(),
-                            *weight_hh.stride(),
-                            bias_hh.stride(0) if has_biases else 0,
-                            feature_size,
-                            state_index,
-                        )
-                    else:
-                        compiled_kernel, _ = rnn_tanh_recurrent_ascend_kernel[
-                            recurrent_grid
-                        ](
-                            hx,
-                            weight_hh,
-                            bias_hh,
-                            input_linear,
-                            hidden_read,
                             layer_output,
                             hidden,
                             time_index,
@@ -1959,21 +2020,76 @@ def _launch_forward(
                             hidden_size,
                             *hx.stride(),
                             *weight_hh.stride(),
-                            bias_hh.stride(0) if has_biases else 0,
                             feature_size,
                             state_index,
                             direction,
                             FIRST_STEP=step == 0,
                             FINAL_STEP=step == seq_len - 1,
-                            HAS_BIAS=has_biases,
-                            BLOCK_M=block_m,
-                            BLOCK_N=block_n,
-                            BLOCK_K=block_k,
+                            BLOCK_N=recurrent_block_n,
+                            BLOCK_K=recurrent_block_k,
                             num_warps=1,
                             num_stages=1,
                         )
-                        if step == 2 and step < seq_len - 1:
-                            compiled_middle = compiled_kernel
+                else:
+                    recurrent_grid = (
+                        triton.cdiv(batch_size, block_m),
+                        triton.cdiv(hidden_size, block_n),
+                    )
+                    compiled_middle = None
+                    direct_grid = (*recurrent_grid, 1)
+                    for step in range(seq_len):
+                        time_index = step if direction == 0 else seq_len - 1 - step
+                        # LibEntry rebuilds the launch key for every recurrent step.
+                        # Step 2 has the reusable middle-step specialization (unlike
+                        # the 0/1 scalar-specialized launches), so subsequent middle
+                        # steps can invoke that same compiled FlagGems kernel directly.
+                        if compiled_middle is not None and step < seq_len - 1:
+                            compiled_middle[direct_grid](
+                                hx,
+                                weight_hh,
+                                bias_hh,
+                                input_linear,
+                                hidden_read,
+                                layer_output,
+                                hidden,
+                                time_index,
+                                *hx.stride(),
+                                *weight_hh.stride(),
+                                bias_hh.stride(0) if has_biases else 0,
+                                feature_size,
+                                state_index,
+                            )
+                        else:
+                            compiled_kernel, _ = rnn_tanh_recurrent_ascend_kernel[
+                                recurrent_grid
+                            ](
+                                hx,
+                                weight_hh,
+                                bias_hh,
+                                input_linear,
+                                hidden_read,
+                                layer_output,
+                                hidden,
+                                time_index,
+                                batch_size,
+                                hidden_size,
+                                *hx.stride(),
+                                *weight_hh.stride(),
+                                bias_hh.stride(0) if has_biases else 0,
+                                feature_size,
+                                state_index,
+                                direction,
+                                FIRST_STEP=step == 0,
+                                FINAL_STEP=step == seq_len - 1,
+                                HAS_BIAS=has_biases,
+                                BLOCK_M=block_m,
+                                BLOCK_N=block_n,
+                                BLOCK_K=block_k,
+                                num_warps=1,
+                                num_stages=1,
+                            )
+                            if step == 2 and step < seq_len - 1:
+                                compiled_middle = compiled_kernel
             elif use_dot:
                 block_b = min(16, triton.next_power_of_2(batch_size))
                 block_b = max(block_b, 16)
