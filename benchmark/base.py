@@ -15,7 +15,6 @@
 import gc
 import math
 import os
-import statistics
 import time
 from dataclasses import asdict
 from typing import Any, Generator, List, Optional, Tuple
@@ -77,77 +76,6 @@ def get_iter_count(fn):
     return max(1, int(Config.warm_up / latency)), max(
         1, int(Config.repetition / latency)
     )
-
-
-def _collect_ascend_invocation_kernel_time(
-    base_dir,
-    funcs,
-    num_warmup,
-    num_active,
-    key=None,
-    return_mode="mean",
-    quantiles=None,
-):
-    """Aggregate every kernel belonging to one profiled function invocation.
-
-    Triton's Ascend collector assumes that each function invocation emits one
-    device kernel. Composite operators violate that assumption, causing it to
-    sample adjacent kernels from the first invocation as if they were separate
-    benchmark repetitions. Profiling executes every function a fixed number of
-    times, so its rows can be split evenly into complete invocation slices.
-    """
-    import numpy as np
-    import pandas as pd
-
-    kernel_details_file = None
-    for root, _, files in os.walk(base_dir):
-        if "kernel_details.csv" in files:
-            kernel_details_file = os.path.join(root, "kernel_details.csv")
-            break
-    if kernel_details_file is None:
-        return float("inf") if len(funcs) == 1 else [float("inf")] * len(funcs)
-
-    frame = pd.read_csv(kernel_details_file)
-    frame = frame[~frame["Type"].str.contains("do_bench_clear", case=False, na=False)]
-    if key is not None:
-        frame = frame[frame["Name"].str.contains(key, na=False)]
-
-    calls_per_func = num_warmup + num_active
-    total_calls = len(funcs) * calls_per_func
-    if total_calls == 0 or len(frame) % total_calls != 0:
-        raise RuntimeError(
-            "Ascend profiler rows cannot be divided into complete function "
-            f"invocations: rows={len(frame)}, calls={total_calls}"
-        )
-    kernels_per_call = len(frame) // total_calls
-    if kernels_per_call == 0:
-        return float("inf") if len(funcs) == 1 else [float("inf")] * len(funcs)
-
-    durations = frame["Duration(us)"].astype(float).to_numpy()
-    times = []
-    for func_index in range(len(funcs)):
-        func_start = func_index * calls_per_func * kernels_per_call
-        active_start = func_start + num_warmup * kernels_per_call
-        for active_index in range(num_active):
-            start = active_start + active_index * kernels_per_call
-            times.append(float(durations[start : start + kernels_per_call].sum()))
-
-    if quantiles:
-        if not all(0.0 <= quantile <= 1.0 for quantile in quantiles):
-            raise ValueError("quantiles values must be in range [0.0, 1.0].")
-        values = np.percentile(times, [quantile * 100 for quantile in quantiles])
-        return torch.tensor(values, dtype=torch.float32)
-    if return_mode == "all":
-        return sum(times)
-    if return_mode == "min":
-        return min(times)
-    if return_mode == "max":
-        return max(times)
-    if return_mode == "median":
-        return statistics.median(times)
-    if return_mode == "mean":
-        return statistics.mean(times)
-    raise ValueError(f"Unsupported return_mode: {return_mode}")
 
 
 class Benchmark:
@@ -379,19 +307,12 @@ class Benchmark:
             latency = (end - start) / n_rep * 1000
         elif Config.mode == consts.BenchMode.KERNEL:
             if vendor_name == "ascend":
-                ascend_testing = triton.backends.ascend.testing
-                original_collector = ascend_testing._collect_prof_result
-                ascend_testing._collect_prof_result = (
-                    _collect_ascend_invocation_kernel_time
+                do_bench = triton.backends.ascend.testing.do_bench_npu
+                latency = do_bench(
+                    fn,
+                    warmup=Config.warm_up,
+                    active=Config.repetition,
                 )
-                try:
-                    latency = ascend_testing.do_bench_npu(
-                        fn,
-                        warmup=Config.warm_up,
-                        active=Config.repetition,
-                    )
-                finally:
-                    ascend_testing._collect_prof_result = original_collector
             else:
                 do_bench = triton.testing.do_bench
                 latency = do_bench(
