@@ -1807,6 +1807,7 @@ def _launch_forward(
             )
             use_dot = (
                 matrix_shape
+                and vendor != "ascend"
                 # NVIDIA's persistent dot kernel supports bf16 tensor cores,
                 # while other backends retain their established selector.
                 and (input.dtype != torch.bfloat16 or prefer_persistent_dot)
@@ -1815,7 +1816,10 @@ def _launch_forward(
                 and (not prefer_persistent_dot or hidden_size > 64)
             )
             use_ascend_tiled = (
-                vendor == "ascend" and matrix_shape and not use_split_persistent
+                vendor == "ascend"
+                and matrix_shape
+                and hidden_size > 128
+                and not use_split_persistent
             )
             if use_split_persistent:
                 rows = seq_len * batch_size
