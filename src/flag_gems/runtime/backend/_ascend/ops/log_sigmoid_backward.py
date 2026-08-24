@@ -26,9 +26,6 @@ from flag_gems.utils.codegen_config_utils import CodeGenConfig
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_NUM_VECTOR_CORES = 40
-_num_vector_cores_cache = None
-
 # CANN 9.0 enables automatic multi-buffering. Larger tiles make this kernel
 # exceed the 192 KiB unified-buffer capacity on Ascend 910B.
 _ASCEND_UB_SAFE_TILE_SIZE = 512
@@ -43,7 +40,7 @@ _LOG_SIGMOID_BACKWARD_CONFIG = CodeGenConfig(
 
 
 _LOG_SIGMOID_BACKWARD_BUFFER_CONFIG = CodeGenConfig(
-    max_tile_size=4096,
+    max_tile_size=8192,
     max_grid_size=(65535, 1, 1),
     max_num_warps_per_cta=32,
     prefer_block_pointer=False,
@@ -141,23 +138,6 @@ def _can_use_buffer(self, buffer):
     )
 
 
-def _get_num_vector_cores():
-    global _num_vector_cores_cache
-    if _num_vector_cores_cache is not None:
-        return _num_vector_cores_cache
-    try:
-        from triton.backends.ascend import driver
-
-        device_id = torch.npu.current_device()
-        properties = driver.active.utils.get_device_properties(device_id)
-        _num_vector_cores_cache = properties.get(
-            "num_vectorcore", _DEFAULT_NUM_VECTOR_CORES
-        )
-    except Exception:
-        _num_vector_cores_cache = _DEFAULT_NUM_VECTOR_CORES
-    return _num_vector_cores_cache
-
-
 def _device_guard(tensor):
     device_index = tensor.device.index
     if device_index is None or device_index == torch_device_fn.current_device():
@@ -193,7 +173,7 @@ def _launch_buffer_contiguous_kernel(grad_output, self, buffer, grad_input):
 
     block_size = _LOG_SIGMOID_BACKWARD_BUFFER_CONFIG.max_tile_size
     tile_count = triton.cdiv(n_elements, block_size)
-    grid_size = min(tile_count, _get_num_vector_cores())
+    grid_size = min(tile_count, 65535)
     tiles_per_program = triton.cdiv(tile_count, grid_size)
     with _device_guard(self):
         log_sigmoid_backward_buffer_contiguous_kernel[(grid_size,)](
