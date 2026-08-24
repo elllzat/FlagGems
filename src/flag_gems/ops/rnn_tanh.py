@@ -1794,7 +1794,11 @@ def _launch_forward(
                 and hidden_size <= 128
                 and (
                     vendor == "ascend"
-                    or (vendor == "nvidia" and input.dtype != torch.bfloat16)
+                    or (
+                        vendor == "nvidia"
+                        and input.dtype != torch.bfloat16
+                        and hidden_size >= 128
+                    )
                     or (
                         vendor == "metax"
                         and input.dtype == torch.float32
