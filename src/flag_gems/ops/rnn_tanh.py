@@ -364,7 +364,7 @@ def rnn_tanh_recurrent_ascend_kernel(
         mask=m_mask[:, None] & n_mask[None, :],
         other=0.0,
     ).to(tl.float32)
-    current = tl_extra_shim.tanh(acc)
+    current = 2.0 / (1.0 + tl.exp(-2.0 * acc)) - 1.0
     mask = m_mask[:, None] & n_mask[None, :]
     output_offsets = (
         row[:, None] * output_feature_size + direction * hidden_size + n_offs[None, :]
@@ -1912,7 +1912,7 @@ def _launch_forward(
                     BLOCK_M=block_m,
                     BLOCK_N=block_n,
                     BLOCK_K=block_k,
-                    num_warps=4,
+                    num_warps=1,
                     num_stages=1,
                 )
                 recurrent_grid = (
@@ -1969,7 +1969,7 @@ def _launch_forward(
                             BLOCK_M=block_m,
                             BLOCK_N=block_n,
                             BLOCK_K=block_k,
-                            num_warps=4,
+                            num_warps=1,
                             num_stages=1,
                         )
                         if step == 2 and step < seq_len - 1:
