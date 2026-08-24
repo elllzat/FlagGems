@@ -31,6 +31,10 @@ from flag_gems.ops.copy import _copy_kernel
 from flag_gems.ops.tanh import tanh_kernel
 from flag_gems.utils import libentry, tl_extra_shim
 from flag_gems.utils.random_utils import philox_backend_seed_offset
+from flag_gems.utils.shape_utils import (
+    heuristics_for_num_warps,
+    heuristics_for_tile_size,
+)
 from flag_gems.utils.tensor_wrapper import StridedBuffer
 
 logger = logging.getLogger(__name__)
@@ -2005,6 +2009,21 @@ def _launch_forward(
                 direct_grid = (*recurrent_grid, 1)
                 if use_ascend_composed_tanh:
                     tanh_impl = tanh_kernel.instantiate(2)
+                    tanh_info = tanh_kernel.get_kernel_info(2)
+                    tanh_jit = tanh_impl.__globals__[tanh_info.kernel_name]
+                    tanh_tile_sizes = heuristics_for_tile_size(
+                        512, batch_size, hidden_size
+                    )
+                    tanh_tile_size = tanh_tile_sizes[0] * tanh_tile_sizes[1]
+                    tanh_num_tiles = triton.cdiv(
+                        batch_size, tanh_tile_sizes[0]
+                    ) * triton.cdiv(hidden_size, tanh_tile_sizes[1])
+                    tanh_num_ctas = min(48, tanh_num_tiles)
+                    tanh_tiles_per_cta = triton.cdiv(tanh_num_tiles, tanh_num_ctas)
+                    tanh_num_warps = heuristics_for_num_warps(tanh_tile_size)
+                    tanh_grid = (tanh_num_ctas, 1, 1)
+                    tanh_direct_grid = (*tanh_grid, 1)
+                    compiled_tanh = None
                     copy_impl = _copy_kernel.instantiate(2)
                     for step in range(seq_len):
                         time_index = step if direction == 0 else seq_len - 1 - step
@@ -2055,7 +2074,32 @@ def _launch_forward(
                             (feature_size, 1),
                             offset=current_offset,
                         )
-                        tanh_impl(current_view, out0=current_view)
+                        if compiled_tanh is not None:
+                            compiled_tanh[tanh_direct_grid](
+                                current_view,
+                                current_view,
+                                batch_size,
+                                hidden_size,
+                                batch_size * hidden_size,
+                                tanh_tiles_per_cta,
+                            )
+                        else:
+                            compiled_tanh, _ = tanh_jit[tanh_grid](
+                                current_view,
+                                current_view,
+                                feature_size,
+                                1,
+                                feature_size,
+                                1,
+                                batch_size,
+                                hidden_size,
+                                batch_size * hidden_size,
+                                tiles_per_cta=tanh_tiles_per_cta,
+                                tile_size0=tanh_tile_sizes[0],
+                                tile_size1=tanh_tile_sizes[1],
+                                one_tile_per_cta=tanh_tiles_per_cta == 1,
+                                num_warps=tanh_num_warps,
+                            )
                     hidden_view = StridedBuffer(
                         hidden,
                         (batch_size, hidden_size),
