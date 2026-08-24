@@ -1915,6 +1915,7 @@ def _launch_forward(
                     num_warps=1,
                     num_stages=1,
                 )
+                block_m = triton.next_power_of_2(batch_size)
                 recurrent_grid = (
                     triton.cdiv(batch_size, block_m),
                     triton.cdiv(hidden_size, block_n),
