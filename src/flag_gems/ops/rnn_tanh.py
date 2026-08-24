@@ -1906,7 +1906,8 @@ def _launch_forward(
                 matrix_shape
                 and hidden_size <= 128
                 and (
-                    (
+                    (vendor == "ascend" and hidden_size >= 128)
+                    or (
                         vendor == "nvidia"
                         and input.dtype != torch.bfloat16
                         and hidden_size >= 128
