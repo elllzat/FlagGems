@@ -38,6 +38,7 @@ from flag_gems.utils.shape_utils import (
 from flag_gems.utils.tensor_wrapper import StridedBuffer
 
 logger = logging.getLogger(__name__)
+flag_gems_tanh_scalar = tanh_kernel._scalar_fn
 
 _CHUNK = tl.constexpr(32)
 
@@ -371,7 +372,7 @@ def rnn_tanh_recurrent_ascend_kernel(
         mask=m_mask[:, None] & n_mask[None, :],
         other=0.0,
     ).to(tl.float32)
-    current = 2.0 / (1.0 + tl.exp(-2.0 * acc)) - 1.0
+    current = flag_gems_tanh_scalar(acc)
     mask = m_mask[:, None] & n_mask[None, :]
     output_offsets = (
         row[:, None] * output_feature_size + direction * hidden_size + n_offs[None, :]
@@ -1964,7 +1965,7 @@ def _launch_forward(
                     num_stages=launch_stages,
                 )
             elif use_ascend_tiled:
-                use_ascend_composed_tanh = hidden_size <= 128
+                use_ascend_composed_tanh = False
                 if not use_ascend_composed_tanh and hidden_read is None:
                     hidden_read = _empty((batch_size, hidden_size), input)
                 rows = seq_len * batch_size
