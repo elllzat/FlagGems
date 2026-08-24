@@ -26,19 +26,6 @@ from flag_gems.utils.codegen_config_utils import CodeGenConfig
 
 logger = logging.getLogger(__name__)
 
-_NATIVE_PREFERRED_MAX_ELEMENTS = 64 * 1024 * 1024
-_PRIVATE_USE1_KEYSET = torch._C.DispatchKeySet(torch._C.DispatchKey.PrivateUse1)
-
-
-def _get_native_kernel():
-    try:
-        return torch.library.get_kernel("aten::log_sigmoid_backward", "PrivateUse1")
-    except (AttributeError, RuntimeError):
-        return None
-
-
-_NATIVE_LOG_SIGMOID_BACKWARD = _get_native_kernel()
-
 # CANN 9.0 enables automatic multi-buffering. Larger tiles make this kernel
 # exceed the 192 KiB unified-buffer capacity on Ascend 910B.
 _ASCEND_UB_SAFE_TILE_SIZE = 512
@@ -110,6 +97,30 @@ def log_sigmoid_backward_contiguous_kernel(
         tl.store(grad_input + offsets, result, mask=mask)
 
 
+@libentry()
+@triton.jit
+def log_sigmoid_backward_buffer_contiguous_kernel(
+    grad_output,
+    self,
+    buffer,
+    grad_input,
+    n_elements,
+    TILES_PER_PROGRAM: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    program_id = ext.program_id(0)
+    program_count = ext.num_programs(0)
+    lane_offsets = tl.arange(0, BLOCK_SIZE)
+    for tile in tl.range(0, TILES_PER_PROGRAM):
+        offsets = (program_id + tile * program_count) * BLOCK_SIZE + lane_offsets
+        mask = offsets < n_elements
+        grad = tl.load(grad_output + offsets, mask=mask)
+        inp = tl.load(self + offsets, mask=mask).to(tl.float32)
+        z = tl.load(buffer + offsets, mask=mask).to(tl.float32)
+        derivative = tl.where(inp < 0.0, 1.0, z) / (1.0 + z)
+        tl.store(grad_input + offsets, grad * derivative, mask=mask)
+
+
 def _can_use_contiguous_kernel(grad_output, self, grad_input=None):
     return (
         grad_output.shape == self.shape
@@ -156,18 +167,37 @@ def _launch_contiguous_kernel(grad_output, self, grad_input):
     return grad_input
 
 
+def _launch_buffer_contiguous_kernel(grad_output, self, buffer, grad_input):
+    n_elements = self.numel()
+    if n_elements == 0:
+        return grad_input
+
+    block_size = _LOG_SIGMOID_BACKWARD_BUFFER_CONFIG.max_tile_size
+    tile_count = triton.cdiv(n_elements, block_size)
+    grid_size = min(tile_count, 65535)
+    tiles_per_program = triton.cdiv(tile_count, grid_size)
+    with _device_guard(self):
+        log_sigmoid_backward_buffer_contiguous_kernel[(grid_size,)](
+            grad_output,
+            self,
+            buffer,
+            grad_input,
+            n_elements,
+            TILES_PER_PROGRAM=tiles_per_program,
+            BLOCK_SIZE=block_size,
+        )
+    return grad_input
+
+
 def log_sigmoid_backward(grad_output, self, buffer):
     logger.debug("GEMS_ASCEND LOG_SIGMOID BACKWARD")
 
-    if (
-        _NATIVE_LOG_SIGMOID_BACKWARD is not None
-        and self.numel() < _NATIVE_PREFERRED_MAX_ELEMENTS
-    ):
-        return _NATIVE_LOG_SIGMOID_BACKWARD.call_boxed(
-            _PRIVATE_USE1_KEYSET, grad_output, self, buffer
-        )
-
     if _can_use_buffer(self, buffer):
+        if _can_use_contiguous_kernel(grad_output, self):
+            grad_input = torch.empty_like(self)
+            return _launch_buffer_contiguous_kernel(
+                grad_output, self, buffer, grad_input
+            )
         return log_sigmoid_backward_buffer_kernel(grad_output, self, buffer)
     return log_sigmoid_backward_kernel(grad_output, self)
 
