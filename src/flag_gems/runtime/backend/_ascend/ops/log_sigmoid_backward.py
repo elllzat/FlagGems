@@ -68,9 +68,8 @@ def log_sigmoid_backward_kernel(grad_output, self):
 )
 @triton.jit
 def log_sigmoid_backward_buffer_kernel(grad_output, self, buffer):
-    self_fp32 = self.to(tl.float32)
-    z = buffer.to(tl.float32)
-    derivative = tl.where(self_fp32 < 0.0, 1.0, z) / (1.0 + z)
+    z = buffer
+    derivative = tl.where(self < 0.0, 1.0, z) / (1.0 + z)
     return grad_output * derivative
 
 
@@ -114,8 +113,8 @@ def log_sigmoid_backward_buffer_contiguous_kernel(
         offsets = (program_id + tile * program_count) * BLOCK_SIZE + lane_offsets
         mask = offsets < n_elements
         grad = tl.load(grad_output + offsets, mask=mask)
-        inp = tl.load(self + offsets, mask=mask).to(tl.float32)
-        z = tl.load(buffer + offsets, mask=mask).to(tl.float32)
+        inp = tl.load(self + offsets, mask=mask)
+        z = tl.load(buffer + offsets, mask=mask)
         derivative = tl.where(inp < 0.0, 1.0, z) / (1.0 + z)
         tl.store(grad_input + offsets, grad * derivative, mask=mask)
 
@@ -171,9 +170,13 @@ def _launch_buffer_contiguous_kernel(grad_output, self, buffer, grad_input):
     if n_elements == 0:
         return grad_input
 
-    block_size = _LOG_SIGMOID_BACKWARD_BUFFER_CONFIG.max_tile_size
+    block_size = (
+        8192
+        if self.dtype in (torch.float16, torch.bfloat16)
+        else _LOG_SIGMOID_BACKWARD_BUFFER_CONFIG.max_tile_size
+    )
     tile_count = triton.cdiv(n_elements, block_size)
-    grid_size = min(tile_count, 1024)
+    grid_size = min(tile_count, 65535)
     tiles_per_program = triton.cdiv(tile_count, grid_size)
     with _device_guard(self):
         log_sigmoid_backward_buffer_contiguous_kernel[(grid_size,)](
