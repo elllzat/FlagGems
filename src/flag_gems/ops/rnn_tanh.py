@@ -1796,7 +1796,7 @@ def _launch_forward(
                     (
                         vendor == "nvidia"
                         and input.dtype != torch.bfloat16
-                        and hidden_size >= 32
+                        and hidden_size >= 128
                     )
                     or (
                         vendor == "metax"
