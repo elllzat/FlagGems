@@ -27,15 +27,9 @@ import triton
 import triton.language as tl
 
 from flag_gems import runtime
-from flag_gems.ops.copy import _copy_kernel
 from flag_gems.ops.tanh import tanh_kernel
 from flag_gems.utils import libentry, tl_extra_shim
 from flag_gems.utils.random_utils import philox_backend_seed_offset
-from flag_gems.utils.shape_utils import (
-    heuristics_for_num_warps,
-    heuristics_for_tile_size,
-)
-from flag_gems.utils.tensor_wrapper import StridedBuffer
 
 logger = logging.getLogger(__name__)
 flag_gems_tanh_scalar = tanh_kernel._scalar_fn
@@ -461,6 +455,39 @@ def rnn_tanh_recurrent_addmm_ascend_kernel(
         acc,
         mask=m_mask[:, None] & n_mask[None, :],
     )
+
+
+@libentry()
+@triton.jit
+def rnn_tanh_activation_ascend_kernel(
+    output_ptr,
+    hidden_ptr,
+    time_index,
+    batch_size: tl.constexpr,
+    hidden_size: tl.constexpr,
+    output_feature_size,
+    state_index,
+    direction: tl.constexpr,
+    FINAL_STEP: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    """Apply the existing FlagGems tanh scalar and optionally save final state."""
+    m_offs = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
+    n_offs = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
+    mask = (m_offs[:, None] < batch_size) & (n_offs[None, :] < hidden_size)
+    row = time_index * batch_size + m_offs
+    output_offsets = (
+        row[:, None] * output_feature_size + direction * hidden_size + n_offs[None, :]
+    )
+    current = tl.load(output_ptr + output_offsets, mask=mask, other=0.0)
+    current = flag_gems_tanh_scalar(current.to(tl.float32))
+    tl.store(output_ptr + output_offsets, current, mask=mask)
+    if FINAL_STEP:
+        hidden_offsets = (
+            state_index * batch_size + m_offs[:, None]
+        ) * hidden_size + n_offs[None, :]
+        tl.store(hidden_ptr + hidden_offsets, current, mask=mask)
 
 
 @libentry()
@@ -1965,7 +1992,7 @@ def _launch_forward(
                     num_stages=launch_stages,
                 )
             elif use_ascend_tiled:
-                use_ascend_composed_tanh = False
+                use_ascend_composed_tanh = hidden_size <= 128
                 if not use_ascend_composed_tanh and hidden_read is None:
                     hidden_read = _empty((batch_size, hidden_size), input)
                 rows = seq_len * batch_size
@@ -2009,23 +2036,16 @@ def _launch_forward(
                 compiled_middle = None
                 direct_grid = (*recurrent_grid, 1)
                 if use_ascend_composed_tanh:
-                    tanh_impl = tanh_kernel.instantiate(2)
-                    tanh_info = tanh_kernel.get_kernel_info(2)
-                    tanh_jit = tanh_impl.__globals__[tanh_info.kernel_name]
-                    tanh_tile_sizes = heuristics_for_tile_size(
-                        512, batch_size, hidden_size
+                    activation_block_n = hidden_size
+                    activation_block_m = min(
+                        batch_size, max(1, 512 // activation_block_n)
                     )
-                    tanh_tile_size = tanh_tile_sizes[0] * tanh_tile_sizes[1]
-                    tanh_num_tiles = triton.cdiv(
-                        batch_size, tanh_tile_sizes[0]
-                    ) * triton.cdiv(hidden_size, tanh_tile_sizes[1])
-                    tanh_num_ctas = min(48, tanh_num_tiles)
-                    tanh_tiles_per_cta = triton.cdiv(tanh_num_tiles, tanh_num_ctas)
-                    tanh_num_warps = heuristics_for_num_warps(tanh_tile_size)
-                    tanh_grid = (tanh_num_ctas, 1, 1)
-                    tanh_direct_grid = (*tanh_grid, 1)
-                    compiled_tanh = None
-                    copy_impl = _copy_kernel.instantiate(2)
+                    activation_grid = (
+                        triton.cdiv(batch_size, activation_block_m),
+                        1,
+                    )
+                    activation_direct_grid = (*activation_grid, 1)
+                    compiled_activation = None
                     for step in range(seq_len):
                         time_index = step if direction == 0 else seq_len - 1 - step
                         if compiled_middle is not None:
@@ -2063,51 +2083,37 @@ def _launch_forward(
                                 num_warps=1,
                                 num_stages=1,
                             )
-                            if step == 2:
+                            if step == 1:
                                 compiled_middle = compiled_kernel
-                        current_offset = (
-                            time_index * batch_size * feature_size
-                            + direction * hidden_size
-                        )
-                        current_view = StridedBuffer(
-                            layer_output,
-                            (batch_size, hidden_size),
-                            (feature_size, 1),
-                            offset=current_offset,
-                        )
-                        if compiled_tanh is not None:
-                            compiled_tanh[tanh_direct_grid](
-                                current_view,
-                                current_view,
-                                batch_size,
-                                hidden_size,
-                                batch_size * hidden_size,
-                                tanh_tiles_per_cta,
+                        final_step = step == seq_len - 1
+                        if compiled_activation is not None and not final_step:
+                            compiled_activation[activation_direct_grid](
+                                layer_output,
+                                hidden,
+                                time_index,
+                                feature_size,
+                                state_index,
                             )
                         else:
-                            compiled_tanh, _ = tanh_jit[tanh_grid](
-                                current_view,
-                                current_view,
-                                feature_size,
-                                1,
-                                feature_size,
-                                1,
+                            compiled_kernel, _ = rnn_tanh_activation_ascend_kernel[
+                                activation_grid
+                            ](
+                                layer_output,
+                                hidden,
+                                time_index,
                                 batch_size,
                                 hidden_size,
-                                batch_size * hidden_size,
-                                tiles_per_cta=tanh_tiles_per_cta,
-                                tile_size0=tanh_tile_sizes[0],
-                                tile_size1=tanh_tile_sizes[1],
-                                one_tile_per_cta=tanh_tiles_per_cta == 1,
-                                num_warps=tanh_num_warps,
+                                feature_size,
+                                state_index,
+                                direction,
+                                FINAL_STEP=final_step,
+                                BLOCK_M=activation_block_m,
+                                BLOCK_N=activation_block_n,
+                                num_warps=1,
+                                num_stages=1,
                             )
-                    hidden_view = StridedBuffer(
-                        hidden,
-                        (batch_size, hidden_size),
-                        (hidden_size, 1),
-                        offset=state_index * batch_size * hidden_size,
-                    )
-                    copy_impl(current_view, out0=hidden_view)
+                            if step == 0 and not final_step:
+                                compiled_activation = compiled_kernel
                 else:
                     for step in range(seq_len):
                         time_index = step if direction == 0 else seq_len - 1 - step
