@@ -1810,13 +1810,9 @@ def _launch_forward(
                 # NVIDIA's persistent dot kernel supports bf16 tensor cores,
                 # while other backends retain their established selector.
                 and (input.dtype != torch.bfloat16 or prefer_persistent_dot)
-                # Keep NVIDIA's fast small-state vector path for bf16. FP16 and
-                # FP32 can use tensor cores here; H=128 is selected above.
-                and (
-                    not prefer_persistent_dot
-                    or input.dtype != torch.bfloat16
-                    or hidden_size > 64
-                )
+                # The vector kernel is faster for small NVIDIA states; larger
+                # states benefit from the tensor-core dot path.
+                and (not prefer_persistent_dot or hidden_size > 64)
             )
             use_ascend_tiled = (
                 vendor == "ascend" and matrix_shape and not use_split_persistent
