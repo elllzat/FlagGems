@@ -2083,7 +2083,7 @@ def _launch_forward(
                                 num_warps=1,
                                 num_stages=1,
                             )
-                            if step == 1:
+                            if step == 2:
                                 compiled_middle = compiled_kernel
                         final_step = step == seq_len - 1
                         if compiled_activation is not None and not final_step:
@@ -2112,7 +2112,7 @@ def _launch_forward(
                                 num_warps=1,
                                 num_stages=1,
                             )
-                            if step == 0 and not final_step:
+                            if step == 2 and not final_step:
                                 compiled_activation = compiled_kernel
                 else:
                     for step in range(seq_len):
