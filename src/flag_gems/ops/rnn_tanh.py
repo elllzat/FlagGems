@@ -385,9 +385,9 @@ def rnn_tanh_recurrent_persistent_kernel(
     linear_ptr,
     output_ptr,
     hidden_ptr,
-    seq_len,
-    batch_size,
-    hidden_size,
+    seq_len: tl.constexpr,
+    batch_size: tl.constexpr,
+    hidden_size: tl.constexpr,
     hx_stride_state,
     hx_stride_b,
     hx_stride_h,
@@ -1793,7 +1793,8 @@ def _launch_forward(
                 matrix_shape
                 and hidden_size <= 128
                 and (
-                    (
+                    vendor == "ascend"
+                    or (
                         vendor == "nvidia"
                         and input.dtype != torch.bfloat16
                         and hidden_size >= 128
