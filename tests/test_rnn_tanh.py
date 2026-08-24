@@ -157,6 +157,31 @@ def test_rnn_tanh_bfloat16_medium_hidden():
     not _RNN_ACCELERATOR_AVAILABLE,
     reason="Triton RNN kernel requires a CUDA or NPU accelerator",
 )
+@pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
+@pytest.mark.parametrize(
+    "shape",
+    [(16, 4, 32), (32, 8, 64), (64, 16, 128)],
+)
+def test_rnn_tanh_comprehensive_forward_shapes(dtype, shape):
+    """Cover comprehensive shapes, including optimized selectors where enabled."""
+    seq_len, batch_size, hidden_size = shape
+    inp, hx, params = _make_case(
+        seq_len,
+        batch_size,
+        hidden_size,
+        hidden_size,
+        dtype,
+    )
+    reference = torch.rnn_tanh(inp, hx, params, True, 1, 0.0, False, False, False)
+    with flag_gems.use_gems():
+        actual = torch.rnn_tanh(inp, hx, params, True, 1, 0.0, False, False, False)
+    _assert_rnn_close(actual, reference, dtype)
+
+
+@pytest.mark.skipif(
+    not _RNN_ACCELERATOR_AVAILABLE,
+    reason="Triton RNN kernel requires a CUDA or NPU accelerator",
+)
 def test_rnn_tanh_backward():
     from flag_gems.ops.rnn_tanh import rnn_tanh as gems_rnn_tanh
 

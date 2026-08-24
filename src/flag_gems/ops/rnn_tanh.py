@@ -205,7 +205,7 @@ def rnn_tanh_forward_dot_kernel(
 
 @libentry()
 @triton.jit
-def rnn_tanh_input_linear_ascend_kernel(
+def rnn_tanh_input_linear_kernel(
     input_ptr,
     weight_ih_ptr,
     bias_ih_ptr,
@@ -231,7 +231,7 @@ def rnn_tanh_input_linear_ascend_kernel(
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
 ):
-    """Precompute all input-to-hidden products with Ascend-friendly tiles."""
+    """Precompute all input-to-hidden products with backend-friendly tiles."""
     row_offs = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
     n_offs = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
     k_offs = tl.arange(0, BLOCK_K)
@@ -375,6 +375,90 @@ def rnn_tanh_recurrent_ascend_kernel(
             state_index * batch_size + m_offs[:, None]
         ) * hidden_size + n_offs[None, :]
         tl.store(hidden_ptr + hidden_offsets, current, mask=mask)
+
+
+@libentry()
+@triton.jit
+def rnn_tanh_recurrent_persistent_kernel(
+    hx_ptr,
+    weight_hh_ptr,
+    linear_ptr,
+    output_ptr,
+    hidden_ptr,
+    seq_len,
+    batch_size,
+    hidden_size,
+    hx_stride_state,
+    hx_stride_b,
+    hx_stride_h,
+    weight_hh_stride_h0,
+    weight_hh_stride_h1,
+    output_feature_size,
+    state_index,
+    direction: tl.constexpr,
+    BLOCK_B: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+):
+    """Consume a precomputed input projection in one recurrent launch.
+
+    Keeping the recurrent state and recurrent weight resident avoids one kernel
+    launch per time step.  The input projection remains a separate, highly
+    parallel matrix multiplication, so it is not serialized inside the
+    persistent recurrence.
+    """
+    batch_start = tl.program_id(0) * BLOCK_B
+    b_offs = batch_start + tl.arange(0, BLOCK_B)
+    h_offs = tl.arange(0, BLOCK_H)
+    b_mask = b_offs < batch_size
+    h_mask = h_offs < hidden_size
+    mask = b_mask[:, None] & h_mask[None, :]
+
+    hidden = tl.load(
+        hx_ptr
+        + state_index * hx_stride_state
+        + b_offs[:, None] * hx_stride_b
+        + h_offs[None, :] * hx_stride_h,
+        mask=mask,
+        other=0.0,
+    ).to(tl.float32)
+    weight_hh = tl.load(
+        weight_hh_ptr
+        + h_offs[:, None] * weight_hh_stride_h0
+        + h_offs[None, :] * weight_hh_stride_h1,
+        mask=h_mask[:, None] & h_mask[None, :],
+        other=0.0,
+    )
+
+    for step in range(seq_len):
+        t = step if direction == 0 else seq_len - 1 - step
+        input_linear = tl.load(
+            linear_ptr
+            + (t * batch_size + b_offs[:, None]) * hidden_size
+            + h_offs[None, :],
+            mask=mask,
+            other=0.0,
+        ).to(tl.float32)
+        hidden_linear = tl.dot(hidden.to(weight_hh.dtype), tl.trans(weight_hh)).to(
+            tl.float32
+        )
+        hidden = tl_extra_shim.tanh(input_linear + hidden_linear)
+        hidden = tl.where(mask, hidden, 0.0)
+        tl.store(
+            output_ptr
+            + (t * batch_size + b_offs[:, None]) * output_feature_size
+            + direction * hidden_size
+            + h_offs[None, :],
+            hidden,
+            mask=mask,
+        )
+
+    tl.store(
+        hidden_ptr
+        + (state_index * batch_size + b_offs[:, None]) * hidden_size
+        + h_offs[None, :],
+        hidden,
+        mask=mask,
+    )
 
 
 @libentry()
@@ -1680,7 +1764,7 @@ def _launch_forward(
     directions = 2 if bidirectional else 1
     hidden_size = hx.shape[2]
     hidden = _empty((num_layers * directions, batch_size, hidden_size), input)
-    hidden_read = _empty((batch_size, hidden_size), input)
+    hidden_read = None
     layer_outputs = []
     current_input = input
     current_input_size = first_input_size
@@ -1698,11 +1782,28 @@ def _launch_forward(
             weight_ih, weight_hh, bias_ih, bias_hh = _unpack_state_params(
                 params, state_index, has_biases
             )
-            use_dot = (
+            matrix_shape = (
                 current_input_size <= 256
                 and hidden_size <= 256
                 and current_input_size >= 16
                 and hidden_size >= 16
+            )
+            vendor = runtime.device.vendor_name
+            use_split_persistent = (
+                matrix_shape
+                and hidden_size <= 128
+                and (
+                    vendor == "ascend"
+                    or (vendor == "nvidia" and input.dtype != torch.bfloat16)
+                    or (
+                        vendor == "metax"
+                        and input.dtype == torch.float32
+                        and hidden_size >= 128
+                    )
+                )
+            )
+            use_dot = (
+                matrix_shape
                 # NVIDIA's persistent dot kernel supports bf16 tensor cores,
                 # while other backends retain their established selector.
                 and (input.dtype != torch.bfloat16 or prefer_persistent_dot)
@@ -1711,13 +1812,72 @@ def _launch_forward(
                 and (not prefer_persistent_dot or hidden_size > 64)
             )
             use_ascend_tiled = (
-                runtime.device.vendor_name == "ascend"
-                and current_input_size <= 256
-                and hidden_size <= 256
-                and current_input_size >= 16
-                and hidden_size >= 16
+                vendor == "ascend" and matrix_shape and not use_split_persistent
             )
-            if use_ascend_tiled:
+            if use_split_persistent:
+                rows = seq_len * batch_size
+                input_linear = _empty((seq_len, batch_size, hidden_size), input)
+                block_m = 16
+                block_n = min(64, max(16, triton.next_power_of_2(hidden_size)))
+                block_k = min(64, max(16, triton.next_power_of_2(current_input_size)))
+                linear_grid = (
+                    triton.cdiv(rows, block_m),
+                    triton.cdiv(hidden_size, block_n),
+                )
+                launch_warps = 1 if vendor == "ascend" else 4
+                launch_stages = 1 if vendor == "ascend" else 2
+                rnn_tanh_input_linear_kernel[linear_grid](
+                    current_input,
+                    weight_ih,
+                    bias_ih,
+                    bias_hh,
+                    input_linear,
+                    rows,
+                    batch_size,
+                    current_input_size,
+                    hidden_size,
+                    *current_strides,
+                    *weight_ih.stride(),
+                    bias_ih.stride(0) if has_biases else 0,
+                    bias_hh.stride(0) if has_biases else 0,
+                    dropout,
+                    dropout_seed,
+                    dropout_base,
+                    HAS_BIAS=has_biases,
+                    APPLY_DROPOUT=apply_dropout,
+                    BLOCK_M=block_m,
+                    BLOCK_N=block_n,
+                    BLOCK_K=block_k,
+                    num_warps=launch_warps,
+                    num_stages=launch_stages,
+                )
+                block_b = 16
+                block_h = max(16, triton.next_power_of_2(hidden_size))
+                recurrent_grid = (triton.cdiv(batch_size, block_b),)
+                rnn_tanh_recurrent_persistent_kernel[recurrent_grid](
+                    hx,
+                    weight_hh,
+                    input_linear,
+                    layer_output,
+                    hidden,
+                    seq_len,
+                    batch_size,
+                    hidden_size,
+                    *hx.stride(),
+                    *weight_hh.stride(),
+                    feature_size,
+                    state_index,
+                    direction,
+                    BLOCK_B=block_b,
+                    BLOCK_H=block_h,
+                    num_warps=(
+                        1 if vendor == "ascend" else (8 if block_h >= 128 else 4)
+                    ),
+                    num_stages=launch_stages,
+                )
+            elif use_ascend_tiled:
+                if hidden_read is None:
+                    hidden_read = _empty((batch_size, hidden_size), input)
                 rows = seq_len * batch_size
                 input_linear = _empty((seq_len, batch_size, hidden_size), input)
                 block_m = 16
@@ -1727,7 +1887,7 @@ def _launch_forward(
                     triton.cdiv(rows, block_m),
                     triton.cdiv(hidden_size, block_n),
                 )
-                rnn_tanh_input_linear_ascend_kernel[linear_grid](
+                rnn_tanh_input_linear_kernel[linear_grid](
                     current_input,
                     weight_ih,
                     bias_ih,
@@ -1851,6 +2011,8 @@ def _launch_forward(
                     num_stages=2,
                 )
             else:
+                if hidden_read is None:
+                    hidden_read = _empty((batch_size, hidden_size), input)
                 grid = (batch_size,)
                 rnn_tanh_forward_vector_kernel[grid](
                     current_input,
