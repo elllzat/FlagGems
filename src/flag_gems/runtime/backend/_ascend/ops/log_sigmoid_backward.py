@@ -172,7 +172,7 @@ def _launch_buffer_contiguous_kernel(grad_output, self, buffer, grad_input):
 
     block_size = (
         8192
-        if self.dtype in (torch.float16, torch.bfloat16)
+        if self.dtype == torch.bfloat16
         else _LOG_SIGMOID_BACKWARD_BUFFER_CONFIG.max_tile_size
     )
     tile_count = triton.cdiv(n_elements, block_size)
