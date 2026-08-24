@@ -492,6 +492,96 @@ def rnn_tanh_activation_ascend_kernel(
 
 @libentry()
 @triton.jit
+def rnn_tanh_recurrent_chunk_ascend_kernel(
+    hx_ptr,
+    weight_hh_ptr,
+    linear_ptr,
+    output_ptr,
+    hidden_ptr,
+    start_step,
+    hx_stride_state,
+    hx_stride_b,
+    hx_stride_h,
+    weight_hh_stride_h0,
+    weight_hh_stride_h1,
+    output_feature_size,
+    state_index,
+    seq_len: tl.constexpr,
+    batch_size: tl.constexpr,
+    hidden_size: tl.constexpr,
+    direction: tl.constexpr,
+    FIRST_CHUNK: tl.constexpr,
+    FINAL_CHUNK: tl.constexpr,
+    STEPS: tl.constexpr,
+    BLOCK_B: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+):
+    """Run a short recurrence chunk using the existing FlagGems tanh scalar."""
+    b_offs = tl.program_id(0) * BLOCK_B + tl.arange(0, BLOCK_B)
+    h_offs = tl.arange(0, BLOCK_H)
+    mask = (b_offs[:, None] < batch_size) & (h_offs[None, :] < hidden_size)
+    start_time = start_step if direction == 0 else seq_len - 1 - start_step
+    if FIRST_CHUNK:
+        hidden = tl.load(
+            hx_ptr
+            + state_index * hx_stride_state
+            + b_offs[:, None] * hx_stride_b
+            + h_offs[None, :] * hx_stride_h,
+            mask=mask,
+            other=0.0,
+        ).to(tl.float32)
+    else:
+        previous_time = start_time - 1 if direction == 0 else start_time + 1
+        hidden = tl.load(
+            output_ptr
+            + (previous_time * batch_size + b_offs[:, None]) * output_feature_size
+            + direction * hidden_size
+            + h_offs[None, :],
+            mask=mask,
+            other=0.0,
+        ).to(tl.float32)
+    weight_hh = tl.load(
+        weight_hh_ptr
+        + h_offs[:, None] * weight_hh_stride_h0
+        + h_offs[None, :] * weight_hh_stride_h1,
+        mask=(h_offs[:, None] < hidden_size) & (h_offs[None, :] < hidden_size),
+        other=0.0,
+    )
+    for local_step in range(STEPS):
+        logical_step = start_step + local_step
+        time_index = logical_step if direction == 0 else seq_len - 1 - logical_step
+        input_linear = tl.load(
+            linear_ptr
+            + (time_index * batch_size + b_offs[:, None]) * hidden_size
+            + h_offs[None, :],
+            mask=mask,
+            other=0.0,
+        ).to(tl.float32)
+        hidden_linear = tl.dot(hidden.to(weight_hh.dtype), tl.trans(weight_hh)).to(
+            tl.float32
+        )
+        hidden = flag_gems_tanh_scalar(input_linear + hidden_linear)
+        hidden = tl.where(mask, hidden, 0.0)
+        tl.store(
+            output_ptr
+            + (time_index * batch_size + b_offs[:, None]) * output_feature_size
+            + direction * hidden_size
+            + h_offs[None, :],
+            hidden,
+            mask=mask,
+        )
+    if FINAL_CHUNK:
+        tl.store(
+            hidden_ptr
+            + (state_index * batch_size + b_offs[:, None]) * hidden_size
+            + h_offs[None, :],
+            hidden,
+            mask=mask,
+        )
+
+
+@libentry()
+@triton.jit
 def rnn_tanh_recurrent_persistent_kernel(
     hx_ptr,
     weight_hh_ptr,
@@ -1906,8 +1996,7 @@ def _launch_forward(
                 matrix_shape
                 and hidden_size <= 128
                 and (
-                    (vendor == "ascend" and hidden_size >= 128)
-                    or (
+                    (
                         vendor == "nvidia"
                         and input.dtype != torch.bfloat16
                         and hidden_size >= 128
@@ -1928,8 +2017,14 @@ def _launch_forward(
                 # states benefit from the tensor-core dot path.
                 and (not prefer_persistent_dot or hidden_size > 64)
             )
+            use_ascend_chunked = (
+                vendor == "ascend" and matrix_shape and hidden_size <= 128
+            )
             use_ascend_tiled = (
-                vendor == "ascend" and matrix_shape and not use_split_persistent
+                vendor == "ascend"
+                and matrix_shape
+                and not use_split_persistent
+                and not use_ascend_chunked
             )
             if use_split_persistent:
                 rows = seq_len * batch_size
@@ -1992,6 +2087,91 @@ def _launch_forward(
                     ),
                     num_stages=launch_stages,
                 )
+            elif use_ascend_chunked:
+                rows = seq_len * batch_size
+                input_linear = _empty((seq_len, batch_size, hidden_size), input)
+                block_m = 16
+                block_n = 32 if hidden_size <= 32 else 64
+                block_k = 32 if max(current_input_size, hidden_size) <= 32 else 64
+                linear_grid = (
+                    triton.cdiv(rows, block_m),
+                    triton.cdiv(hidden_size, block_n),
+                )
+                rnn_tanh_input_linear_kernel[linear_grid](
+                    current_input,
+                    weight_ih,
+                    bias_ih,
+                    bias_hh,
+                    input_linear,
+                    rows,
+                    batch_size,
+                    current_input_size,
+                    hidden_size,
+                    *current_strides,
+                    *weight_ih.stride(),
+                    bias_ih.stride(0) if has_biases else 0,
+                    bias_hh.stride(0) if has_biases else 0,
+                    dropout,
+                    dropout_seed,
+                    dropout_base,
+                    HAS_BIAS=has_biases,
+                    APPLY_DROPOUT=apply_dropout,
+                    BLOCK_M=block_m,
+                    BLOCK_N=block_n,
+                    BLOCK_K=block_k,
+                    num_warps=1,
+                    num_stages=1,
+                )
+                chunk_size = 2
+                block_b = 16
+                block_h = max(16, triton.next_power_of_2(hidden_size))
+                recurrent_grid = (triton.cdiv(batch_size, block_b),)
+                direct_grid = (*recurrent_grid, 1)
+                compiled_middle = None
+                for chunk_start in range(0, seq_len, chunk_size):
+                    steps = min(chunk_size, seq_len - chunk_start)
+                    final_chunk = chunk_start + steps == seq_len
+                    if compiled_middle is not None and not final_chunk:
+                        compiled_middle[direct_grid](
+                            hx,
+                            weight_hh,
+                            input_linear,
+                            layer_output,
+                            hidden,
+                            chunk_start,
+                            *hx.stride(),
+                            *weight_hh.stride(),
+                            feature_size,
+                            state_index,
+                        )
+                    else:
+                        compiled_kernel, _ = rnn_tanh_recurrent_chunk_ascend_kernel[
+                            recurrent_grid
+                        ](
+                            hx,
+                            weight_hh,
+                            input_linear,
+                            layer_output,
+                            hidden,
+                            chunk_start,
+                            *hx.stride(),
+                            *weight_hh.stride(),
+                            feature_size,
+                            state_index,
+                            seq_len,
+                            batch_size,
+                            hidden_size,
+                            direction,
+                            FIRST_CHUNK=chunk_start == 0,
+                            FINAL_CHUNK=final_chunk,
+                            STEPS=steps,
+                            BLOCK_B=block_b,
+                            BLOCK_H=block_h,
+                            num_warps=1,
+                            num_stages=1,
+                        )
+                        if chunk_start == chunk_size and not final_chunk:
+                            compiled_middle = compiled_kernel
             elif use_ascend_tiled:
                 use_ascend_composed_tanh = hidden_size <= 128
                 if not use_ascend_composed_tanh and hidden_read is None:
