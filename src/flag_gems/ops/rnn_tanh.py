@@ -27,8 +27,11 @@ import triton
 import triton.language as tl
 
 from flag_gems import runtime
+from flag_gems.ops.copy import _copy_kernel
+from flag_gems.ops.tanh import tanh_kernel
 from flag_gems.utils import libentry, tl_extra_shim
 from flag_gems.utils.random_utils import philox_backend_seed_offset
+from flag_gems.utils.tensor_wrapper import StridedBuffer
 
 logger = logging.getLogger(__name__)
 
@@ -375,6 +378,84 @@ def rnn_tanh_recurrent_ascend_kernel(
             state_index * batch_size + m_offs[:, None]
         ) * hidden_size + n_offs[None, :]
         tl.store(hidden_ptr + hidden_offsets, current, mask=mask)
+
+
+@libentry()
+@triton.jit
+def rnn_tanh_recurrent_addmm_ascend_kernel(
+    hx_ptr,
+    weight_hh_ptr,
+    linear_ptr,
+    output_ptr,
+    time_index,
+    batch_size: tl.constexpr,
+    hidden_size: tl.constexpr,
+    hx_stride_state,
+    hx_stride_b,
+    hx_stride_h,
+    weight_hh_stride_h0,
+    weight_hh_stride_h1,
+    output_feature_size,
+    state_index,
+    direction: tl.constexpr,
+    FIRST_STEP: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    """Compute one recurrent addmm; FlagGems tanh runs separately in-place."""
+    m_offs = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
+    n_offs = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
+    k_offs = tl.arange(0, BLOCK_K)
+    m_mask = m_offs < batch_size
+    n_mask = n_offs < hidden_size
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+
+    for k_start in range(0, hidden_size, BLOCK_K):
+        ks = k_start + k_offs
+        k_mask = ks < hidden_size
+        if FIRST_STEP:
+            previous = tl.load(
+                hx_ptr
+                + state_index * hx_stride_state
+                + m_offs[:, None] * hx_stride_b
+                + ks[None, :] * hx_stride_h,
+                mask=m_mask[:, None] & k_mask[None, :],
+                other=0.0,
+            )
+        else:
+            previous_time = time_index - 1 if direction == 0 else time_index + 1
+            previous = tl.load(
+                output_ptr
+                + (previous_time * batch_size + m_offs[:, None]) * output_feature_size
+                + direction * hidden_size
+                + ks[None, :],
+                mask=m_mask[:, None] & k_mask[None, :],
+                other=0.0,
+            )
+        weight = tl.load(
+            weight_hh_ptr
+            + ks[:, None] * weight_hh_stride_h1
+            + n_offs[None, :] * weight_hh_stride_h0,
+            mask=k_mask[:, None] & n_mask[None, :],
+            other=0.0,
+        )
+        acc += tl.dot(previous.to(weight.dtype), weight)
+
+    row = time_index * batch_size + m_offs
+    acc += tl.load(
+        linear_ptr + row[:, None] * hidden_size + n_offs[None, :],
+        mask=m_mask[:, None] & n_mask[None, :],
+        other=0.0,
+    ).to(tl.float32)
+    output_offsets = (
+        row[:, None] * output_feature_size + direction * hidden_size + n_offs[None, :]
+    )
+    tl.store(
+        output_ptr + output_offsets,
+        acc,
+        mask=m_mask[:, None] & n_mask[None, :],
+    )
 
 
 @libentry()
@@ -1879,7 +1960,8 @@ def _launch_forward(
                     num_stages=launch_stages,
                 )
             elif use_ascend_tiled:
-                if hidden_read is None:
+                use_ascend_composed_tanh = hidden_size <= 128
+                if not use_ascend_composed_tanh and hidden_read is None:
                     hidden_read = _empty((batch_size, hidden_size), input)
                 rows = seq_len * batch_size
                 input_linear = _empty((seq_len, batch_size, hidden_size), input)
@@ -1921,59 +2003,120 @@ def _launch_forward(
                 )
                 compiled_middle = None
                 direct_grid = (*recurrent_grid, 1)
-                for step in range(seq_len):
-                    time_index = step if direction == 0 else seq_len - 1 - step
-                    # LibEntry rebuilds the launch key for every recurrent step.
-                    # Step 2 has the reusable middle-step specialization (unlike
-                    # the 0/1 scalar-specialized launches), so subsequent middle
-                    # steps can invoke that same compiled FlagGems kernel directly.
-                    if compiled_middle is not None and step < seq_len - 1:
-                        compiled_middle[direct_grid](
-                            hx,
-                            weight_hh,
-                            bias_hh,
-                            input_linear,
-                            hidden_read,
-                            layer_output,
-                            hidden,
-                            time_index,
-                            *hx.stride(),
-                            *weight_hh.stride(),
-                            bias_hh.stride(0) if has_biases else 0,
-                            feature_size,
-                            state_index,
+                if use_ascend_composed_tanh:
+                    tanh_impl = tanh_kernel.instantiate(2)
+                    copy_impl = _copy_kernel.instantiate(2)
+                    for step in range(seq_len):
+                        time_index = step if direction == 0 else seq_len - 1 - step
+                        if compiled_middle is not None:
+                            compiled_middle[direct_grid](
+                                hx,
+                                weight_hh,
+                                input_linear,
+                                layer_output,
+                                time_index,
+                                *hx.stride(),
+                                *weight_hh.stride(),
+                                feature_size,
+                                state_index,
+                            )
+                        else:
+                            compiled_kernel, _ = rnn_tanh_recurrent_addmm_ascend_kernel[
+                                recurrent_grid
+                            ](
+                                hx,
+                                weight_hh,
+                                input_linear,
+                                layer_output,
+                                time_index,
+                                batch_size,
+                                hidden_size,
+                                *hx.stride(),
+                                *weight_hh.stride(),
+                                feature_size,
+                                state_index,
+                                direction,
+                                FIRST_STEP=step == 0,
+                                BLOCK_M=block_m,
+                                BLOCK_N=block_n,
+                                BLOCK_K=block_k,
+                                num_warps=1,
+                                num_stages=1,
+                            )
+                            if step == 2:
+                                compiled_middle = compiled_kernel
+                        current_offset = (
+                            time_index * batch_size * feature_size
+                            + direction * hidden_size
                         )
-                    else:
-                        compiled_kernel, _ = rnn_tanh_recurrent_ascend_kernel[
-                            recurrent_grid
-                        ](
-                            hx,
-                            weight_hh,
-                            bias_hh,
-                            input_linear,
-                            hidden_read,
+                        current_view = StridedBuffer(
                             layer_output,
-                            hidden,
-                            time_index,
-                            batch_size,
-                            hidden_size,
-                            *hx.stride(),
-                            *weight_hh.stride(),
-                            bias_hh.stride(0) if has_biases else 0,
-                            feature_size,
-                            state_index,
-                            direction,
-                            FIRST_STEP=step == 0,
-                            FINAL_STEP=step == seq_len - 1,
-                            HAS_BIAS=has_biases,
-                            BLOCK_M=block_m,
-                            BLOCK_N=block_n,
-                            BLOCK_K=block_k,
-                            num_warps=1,
-                            num_stages=1,
+                            (batch_size, hidden_size),
+                            (feature_size, 1),
+                            offset=current_offset,
                         )
-                        if step == 2 and step < seq_len - 1:
-                            compiled_middle = compiled_kernel
+                        tanh_impl(current_view, out0=current_view)
+                    hidden_view = StridedBuffer(
+                        hidden,
+                        (batch_size, hidden_size),
+                        (hidden_size, 1),
+                        offset=state_index * batch_size * hidden_size,
+                    )
+                    copy_impl(current_view, out0=hidden_view)
+                else:
+                    for step in range(seq_len):
+                        time_index = step if direction == 0 else seq_len - 1 - step
+                        # LibEntry rebuilds the launch key for every recurrent step.
+                        # Step 2 has the reusable middle-step specialization (unlike
+                        # the 0/1 scalar-specialized launches), so subsequent middle
+                        # steps can invoke that same compiled FlagGems kernel directly.
+                        if compiled_middle is not None and step < seq_len - 1:
+                            compiled_middle[direct_grid](
+                                hx,
+                                weight_hh,
+                                bias_hh,
+                                input_linear,
+                                hidden_read,
+                                layer_output,
+                                hidden,
+                                time_index,
+                                *hx.stride(),
+                                *weight_hh.stride(),
+                                bias_hh.stride(0) if has_biases else 0,
+                                feature_size,
+                                state_index,
+                            )
+                        else:
+                            compiled_kernel, _ = rnn_tanh_recurrent_ascend_kernel[
+                                recurrent_grid
+                            ](
+                                hx,
+                                weight_hh,
+                                bias_hh,
+                                input_linear,
+                                hidden_read,
+                                layer_output,
+                                hidden,
+                                time_index,
+                                batch_size,
+                                hidden_size,
+                                *hx.stride(),
+                                *weight_hh.stride(),
+                                bias_hh.stride(0) if has_biases else 0,
+                                feature_size,
+                                state_index,
+                                direction,
+                                FIRST_STEP=step == 0,
+                                FINAL_STEP=step == seq_len - 1,
+                                HAS_BIAS=has_biases,
+                                BLOCK_M=block_m,
+                                BLOCK_N=block_n,
+                                BLOCK_K=block_k,
+                                num_warps=1,
+                                num_stages=1,
+                            )
+                            if step == 2 and step < seq_len - 1:
+                                compiled_middle = compiled_kernel
             elif use_dot:
                 block_b = min(16, triton.next_power_of_2(batch_size))
                 block_b = max(block_b, 16)
