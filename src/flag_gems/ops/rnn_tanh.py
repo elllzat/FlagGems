@@ -1793,8 +1793,7 @@ def _launch_forward(
                 matrix_shape
                 and hidden_size <= 128
                 and (
-                    vendor == "ascend"
-                    or (
+                    (
                         vendor == "nvidia"
                         and input.dtype != torch.bfloat16
                         and hidden_size >= 128
@@ -1913,7 +1912,7 @@ def _launch_forward(
                     BLOCK_M=block_m,
                     BLOCK_N=block_n,
                     BLOCK_K=block_k,
-                    num_warps=1,
+                    num_warps=4,
                     num_stages=1,
                 )
                 recurrent_grid = (
@@ -1970,7 +1969,7 @@ def _launch_forward(
                             BLOCK_M=block_m,
                             BLOCK_N=block_n,
                             BLOCK_K=block_k,
-                            num_warps=1,
+                            num_warps=4,
                             num_stages=1,
                         )
                         if step == 2 and step < seq_len - 1:
