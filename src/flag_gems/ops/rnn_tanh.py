@@ -364,7 +364,7 @@ def rnn_tanh_recurrent_ascend_kernel(
         mask=m_mask[:, None] & n_mask[None, :],
         other=0.0,
     ).to(tl.float32)
-    current = 2.0 / (1.0 + tl.exp(-2.0 * acc)) - 1.0
+    current = tl_extra_shim.tanh(acc)
     mask = m_mask[:, None] & n_mask[None, :]
     output_offsets = (
         row[:, None] * output_feature_size + direction * hidden_size + n_offs[None, :]
@@ -1793,8 +1793,7 @@ def _launch_forward(
                 matrix_shape
                 and hidden_size <= 128
                 and (
-                    vendor == "ascend"
-                    or (
+                    (
                         vendor == "nvidia"
                         and input.dtype != torch.bfloat16
                         and hidden_size >= 128
