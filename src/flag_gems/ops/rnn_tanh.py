@@ -2123,7 +2123,7 @@ def _launch_forward(
                     num_warps=1,
                     num_stages=1,
                 )
-                chunk_size = 4
+                chunk_size = 5
                 block_b = 8
                 block_h = max(16, triton.next_power_of_2(hidden_size))
                 recurrent_grid = (triton.cdiv(batch_size, block_b),)
