@@ -2152,7 +2152,7 @@ def _launch_forward(
                         STEPS=steps,
                         BLOCK_B=block_b,
                         BLOCK_H=block_h,
-                        num_warps=1,
+                        num_warps=2,
                         num_stages=1,
                     )
             elif use_ascend_tiled:
