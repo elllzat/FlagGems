@@ -2156,9 +2156,7 @@ def _launch_forward(
                         num_stages=1,
                     )
             elif use_ascend_tiled:
-                use_ascend_composed_tanh = (
-                    hidden_size <= 128 and input.dtype != torch.bfloat16
-                )
+                use_ascend_composed_tanh = hidden_size <= 128
                 if not use_ascend_composed_tanh and hidden_read is None:
                     hidden_read = _empty((batch_size, hidden_size), input)
                 rows = seq_len * batch_size
