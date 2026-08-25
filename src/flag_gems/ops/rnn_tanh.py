@@ -2293,6 +2293,7 @@ def _launch_forward(
                     triton.cdiv(hidden_size, block_n),
                 )
                 compiled_middle = None
+                reusable_step = 2 if direction == 0 else 1
                 direct_grid = (*recurrent_grid, 1)
                 if use_ascend_composed_tanh:
                     activation_block_n = hidden_size
@@ -2342,7 +2343,7 @@ def _launch_forward(
                                 num_warps=1,
                                 num_stages=1,
                             )
-                            if step == 2:
+                            if step == reusable_step and time_index > 1:
                                 compiled_middle = compiled_kernel
                         final_step = step == seq_len - 1
                         if compiled_activation is not None and not final_step:
@@ -2371,15 +2372,18 @@ def _launch_forward(
                                 num_warps=1,
                                 num_stages=1,
                             )
-                            if step == 2 and not final_step:
+                            if (
+                                step == reusable_step
+                                and time_index > 1
+                                and not final_step
+                            ):
                                 compiled_activation = compiled_kernel
                 else:
                     for step in range(seq_len):
                         time_index = step if direction == 0 else seq_len - 1 - step
                         # LibEntry rebuilds the launch key for every recurrent step.
-                        # Step 2 has the reusable middle-step specialization (unlike
-                        # the 0/1 scalar-specialized launches), so subsequent middle
-                        # steps can invoke that same compiled FlagGems kernel directly.
+                        # Capture a non-initial launch whose time index is not the
+                        # scalar-specialized 0/1, then reuse that FlagGems kernel.
                         if compiled_middle is not None and step < seq_len - 1:
                             compiled_middle[direct_grid](
                                 hx,
@@ -2425,7 +2429,11 @@ def _launch_forward(
                                 num_warps=1,
                                 num_stages=1,
                             )
-                            if step == 2 and step < seq_len - 1:
+                            if (
+                                step == reusable_step
+                                and time_index > 1
+                                and step < seq_len - 1
+                            ):
                                 compiled_middle = compiled_kernel
             elif use_dot:
                 block_b = min(16, triton.next_power_of_2(batch_size))
