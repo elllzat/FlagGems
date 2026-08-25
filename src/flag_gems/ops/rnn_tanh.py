@@ -2626,12 +2626,7 @@ def _launch_backward(
             )
             dpre = _empty((seq_len, batch_size, hidden_size), input)
             if runtime.device.vendor_name == "ascend":
-                bptt_kernel = (
-                    rnn_tanh_bptt_vector_kernel
-                    if direction == 0
-                    else rnn_tanh_bptt_reverse_vector_kernel
-                )
-                bptt_args = [
+                rnn_tanh_bptt_vector_kernel[(batch_size,)](
                     current_grad,
                     grad_hidden_contiguous,
                     layer_outputs[layer],
@@ -2646,11 +2641,7 @@ def _launch_backward(
                     directions * hidden_size,
                     *weight_hh.stride(),
                     state_index,
-                ]
-                if direction == 0:
-                    bptt_args.append(direction)
-                bptt_kernel[(batch_size,)](
-                    *bptt_args,
+                    direction,
                     BLOCK_H=64,
                     num_warps=1,
                     num_stages=1,
