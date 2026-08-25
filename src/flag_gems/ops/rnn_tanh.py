@@ -2531,7 +2531,7 @@ def _launch_backward(
                     block_h = max(16, triton.next_power_of_2(hidden_size))
                     bptt_grid = (triton.cdiv(batch_size, block_b),)
                     if compiled_bptt is not None:
-                        compiled_bptt[(*bptt_grid, 1)](
+                        compiled_bptt[(*bptt_grid, 1, 1)](
                             current_grad,
                             grad_hx,
                             layer_outputs[layer],
