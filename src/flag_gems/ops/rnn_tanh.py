@@ -2522,9 +2522,7 @@ def _launch_backward(
             dpre = _empty((seq_len, batch_size, hidden_size), input)
             if runtime.device.vendor_name == "ascend":
                 time_indices = (
-                    range(seq_len - 1, -1, -1)
-                    if direction == 0
-                    else range(seq_len - 1, -1, -1)
+                    range(seq_len - 1, -1, -1) if direction == 0 else range(seq_len)
                 )
                 for time_index in time_indices:
                     row_offset = time_index * batch_size
