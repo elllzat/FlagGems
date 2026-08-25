@@ -134,6 +134,7 @@ def test_codex_rnn_diag():
             bidirectional=True,
         )
         grads = []
+        forward_values = []
         for implementation in (torch.rnn_tanh, rnn_tanh):
             current_input = inp.detach().clone().requires_grad_(True)
             current_hx = hx.detach().clone().requires_grad_(True)
@@ -151,6 +152,7 @@ def test_codex_rnn_diag():
                 True,
                 False,
             )
+            forward_values.append((output.detach(), hidden.detach()))
             (output[..., 16:].sum() + hidden[1].sum()).backward()
             grads.append(
                 (
@@ -162,6 +164,8 @@ def test_codex_rnn_diag():
         print(
             "REVERSE_LENGTH",
             seq_len,
+            (forward_values[1][0] - forward_values[0][0]).abs().max().item(),
+            (forward_values[1][1] - forward_values[0][1]).abs().max().item(),
             (grads[1][0] - grads[0][0]).abs().max().item(),
             (grads[1][1] - grads[0][1]).abs().max().item(),
             max(
