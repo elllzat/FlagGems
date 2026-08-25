@@ -1617,7 +1617,7 @@ def rnn_tanh_packed_bptt_step_dot_kernel(
     layer_output_ptr,
     weight_hh_ptr,
     dpre_ptr,
-    row_offset: tl.constexpr,
+    row_offset,
     active_batch,
     max_batch,
     hidden_size,
@@ -2521,34 +2521,26 @@ def _launch_backward(
             )
             dpre = _empty((seq_len, batch_size, hidden_size), input)
             if runtime.device.vendor_name == "ascend":
-                time_indices = (
-                    range(seq_len - 1, -1, -1) if direction == 0 else range(seq_len)
+                rnn_tanh_bptt_vector_kernel[(batch_size,)](
+                    current_grad,
+                    grad_hidden_contiguous,
+                    layer_outputs[layer],
+                    weight_hh,
+                    dpre,
+                    grad_hx,
+                    dh_read,
+                    seq_len,
+                    batch_size,
+                    hidden_size,
+                    *current_grad_strides,
+                    directions * hidden_size,
+                    *weight_hh.stride(),
+                    state_index,
+                    direction,
+                    BLOCK_H=64,
+                    num_warps=1,
+                    num_stages=1,
                 )
-                for time_index in time_indices:
-                    row_offset = time_index * batch_size
-                    block_b = 16
-                    block_h = max(16, triton.next_power_of_2(hidden_size))
-                    rnn_tanh_packed_bptt_step_dot_kernel[
-                        (triton.cdiv(batch_size, block_b),)
-                    ](
-                        current_grad,
-                        grad_hx,
-                        layer_outputs[layer],
-                        weight_hh,
-                        dpre,
-                        row_offset,
-                        batch_size,
-                        batch_size,
-                        hidden_size,
-                        directions * hidden_size,
-                        *weight_hh.stride(),
-                        state_index,
-                        direction,
-                        BLOCK_B=block_b,
-                        BLOCK_H=block_h,
-                        num_warps=1,
-                        num_stages=1,
-                    )
             elif hidden_size <= 256 and hidden_size >= 16:
                 block_b = max(16, min(16, triton.next_power_of_2(batch_size)))
                 block_h = max(16, triton.next_power_of_2(hidden_size))
