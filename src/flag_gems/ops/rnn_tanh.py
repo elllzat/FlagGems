@@ -980,6 +980,103 @@ def rnn_tanh_bptt_vector_kernel(
 
 @libentry()
 @triton.jit
+def rnn_tanh_bptt_reverse_vector_kernel(
+    grad_output_ptr,
+    grad_hidden_ptr,
+    layer_output_ptr,
+    weight_hh_ptr,
+    dpre_ptr,
+    grad_hx_ptr,
+    dh_read_ptr,
+    seq_len,
+    batch_size,
+    hidden_size,
+    grad_stride_t,
+    grad_stride_b,
+    grad_stride_h,
+    output_feature_size,
+    weight_hh_stride_h0,
+    weight_hh_stride_h1,
+    state_index,
+    BLOCK_H: tl.constexpr,
+):
+    """Ascend reverse-direction BPTT without direction-dependent expressions."""
+    batch_idx = tl.program_id(0)
+    if batch_idx >= batch_size:
+        return
+    h_block_offs = tl.arange(0, BLOCK_H)
+    chunk_offs = tl.arange(0, _CHUNK)
+    num_h_blocks = tl.cdiv(hidden_size, BLOCK_H)
+    state_base = (state_index * batch_size + batch_idx) * hidden_size
+    read_base = batch_idx * hidden_size
+
+    for h_block in range(num_h_blocks):
+        h_offs = h_block * BLOCK_H + h_block_offs
+        h_mask = h_offs < hidden_size
+        dh = tl.load(grad_hidden_ptr + state_base + h_offs, mask=h_mask, other=0.0)
+        tl.store(grad_hx_ptr + state_base + h_offs, dh, mask=h_mask)
+
+    for step in range(seq_len):
+        for h_block in range(num_h_blocks):
+            h_offs = h_block * BLOCK_H + h_block_offs
+            h_mask = h_offs < hidden_size
+            dh = tl.load(grad_hx_ptr + state_base + h_offs, mask=h_mask, other=0.0).to(
+                tl.float32
+            )
+            go_offsets = (
+                step * grad_stride_t
+                + batch_idx * grad_stride_b
+                + (hidden_size + h_offs) * grad_stride_h
+            )
+            dh += tl.load(grad_output_ptr + go_offsets, mask=h_mask, other=0.0).to(
+                tl.float32
+            )
+            output_offsets = (
+                (step * batch_size + batch_idx) * output_feature_size
+                + hidden_size
+                + h_offs
+            )
+            h = tl.load(layer_output_ptr + output_offsets, mask=h_mask, other=0.0).to(
+                tl.float32
+            )
+            dpre = dh * (1.0 - h * h)
+            dpre_offsets = (step * batch_size + batch_idx) * hidden_size + h_offs
+            tl.store(dpre_ptr + dpre_offsets, dpre, mask=h_mask)
+
+        tl.debug_barrier()
+        for h_block in range(num_h_blocks):
+            j_offs = h_block * BLOCK_H + h_block_offs
+            j_mask = j_offs < hidden_size
+            acc = tl.zeros([BLOCK_H], dtype=tl.float32)
+            for k_start in range(0, hidden_size, _CHUNK):
+                k_offs = k_start + chunk_offs
+                k_mask = k_offs < hidden_size
+                dp = tl.load(
+                    dpre_ptr + (step * batch_size + batch_idx) * hidden_size + k_offs,
+                    mask=k_mask,
+                    other=0.0,
+                ).to(tl.float32)
+                w_offsets = (
+                    k_offs[:, None] * weight_hh_stride_h0
+                    + j_offs[None, :] * weight_hh_stride_h1
+                )
+                w = tl.load(
+                    weight_hh_ptr + w_offsets,
+                    mask=k_mask[:, None] & j_mask[None, :],
+                    other=0.0,
+                ).to(tl.float32)
+                acc += tl.sum(dp[:, None] * w, axis=0)
+            tl.store(dh_read_ptr + read_base + j_offs, acc, mask=j_mask)
+        tl.debug_barrier()
+        for h_block in range(num_h_blocks):
+            h_offs = h_block * BLOCK_H + h_block_offs
+            h_mask = h_offs < hidden_size
+            dh = tl.load(dh_read_ptr + read_base + h_offs, mask=h_mask, other=0.0)
+            tl.store(grad_hx_ptr + state_base + h_offs, dh, mask=h_mask)
+
+
+@libentry()
+@triton.jit
 def rnn_tanh_bptt_step_kernel(
     grad_output_ptr,
     grad_state_ptr,
@@ -2521,7 +2618,12 @@ def _launch_backward(
             )
             dpre = _empty((seq_len, batch_size, hidden_size), input)
             if runtime.device.vendor_name == "ascend":
-                rnn_tanh_bptt_vector_kernel[(batch_size,)](
+                bptt_kernel = (
+                    rnn_tanh_bptt_vector_kernel
+                    if direction == 0
+                    else rnn_tanh_bptt_reverse_vector_kernel
+                )
+                bptt_args = [
                     current_grad,
                     grad_hidden_contiguous,
                     layer_outputs[layer],
@@ -2536,7 +2638,11 @@ def _launch_backward(
                     directions * hidden_size,
                     *weight_hh.stride(),
                     state_index,
-                    direction,
+                ]
+                if direction == 0:
+                    bptt_args.append(direction)
+                bptt_kernel[(batch_size,)](
+                    *bptt_args,
                     BLOCK_H=64,
                     num_warps=1,
                     num_stages=1,
