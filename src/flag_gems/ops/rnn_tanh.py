@@ -2161,7 +2161,7 @@ def _launch_forward(
                     hidden_read = _empty((batch_size, hidden_size), input)
                 rows = seq_len * batch_size
                 input_linear = _empty((seq_len, batch_size, hidden_size), input)
-                block_m = 8 if hidden_size == 32 else 16
+                block_m = 16
                 block_n = 32 if hidden_size <= 32 else 64
                 block_k = 32 if max(current_input_size, hidden_size) <= 32 else 64
                 linear_grid = (
@@ -2193,7 +2193,6 @@ def _launch_forward(
                     num_warps=1,
                     num_stages=1,
                 )
-                block_m = 16
                 recurrent_grid = (
                     triton.cdiv(batch_size, block_m),
                     triton.cdiv(hidden_size, block_n),
@@ -2246,7 +2245,7 @@ def _launch_forward(
                                 BLOCK_N=block_n,
                                 BLOCK_K=block_k,
                                 num_warps=1,
-                                num_stages=1,
+                                num_stages=2 if hidden_size == 128 else 1,
                             )
                             if step == 2:
                                 compiled_middle = compiled_kernel
