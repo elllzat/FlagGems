@@ -529,7 +529,7 @@ def rnn_tanh_recurrent_chunk_ascend_kernel(
             + h_offs[None, :] * hx_stride_h,
             mask=mask,
             other=0.0,
-        ).to(tl.float32)
+        )
     else:
         previous_time = start_time - 1 if direction == 0 else start_time + 1
         hidden = tl.load(
@@ -539,7 +539,7 @@ def rnn_tanh_recurrent_chunk_ascend_kernel(
             + h_offs[None, :],
             mask=mask,
             other=0.0,
-        ).to(tl.float32)
+        )
     weight_hh = tl.load(
         weight_hh_ptr
         + h_offs[:, None] * weight_hh_stride_h0
@@ -557,11 +557,9 @@ def rnn_tanh_recurrent_chunk_ascend_kernel(
             mask=mask,
             other=0.0,
         ).to(tl.float32)
-        hidden_linear = tl.dot(hidden.to(weight_hh.dtype), tl.trans(weight_hh)).to(
-            tl.float32
-        )
-        hidden = flag_gems_tanh_scalar(input_linear + hidden_linear)
-        hidden = tl.where(mask, hidden, 0.0)
+        hidden_linear = tl.dot(hidden, tl.trans(weight_hh)).to(tl.float32)
+        hidden = flag_gems_tanh_scalar(input_linear + hidden_linear).to(weight_hh.dtype)
+        hidden = tl.where(mask, hidden, 0.0).to(weight_hh.dtype)
         tl.store(
             output_ptr
             + (time_index * batch_size + b_offs[:, None]) * output_feature_size
@@ -2245,7 +2243,7 @@ def _launch_forward(
                                 BLOCK_N=block_n,
                                 BLOCK_K=block_k,
                                 num_warps=1,
-                                num_stages=2 if hidden_size == 128 else 1,
+                                num_stages=1,
                             )
                             if step == 2:
                                 compiled_middle = compiled_kernel
