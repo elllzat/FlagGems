@@ -2520,9 +2520,7 @@ def _launch_backward(
                 params, state_index, has_biases
             )
             dpre = _empty((seq_len, batch_size, hidden_size), input)
-            if runtime.device.vendor_name == "ascend" and not (
-                16 <= hidden_size <= 256
-            ):
+            if runtime.device.vendor_name == "ascend":
                 time_indices = (
                     range(seq_len - 1, -1, -1) if direction == 0 else range(seq_len)
                 )
