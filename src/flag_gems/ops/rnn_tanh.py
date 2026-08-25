@@ -1997,11 +1997,6 @@ def _launch_forward(
                 and hidden_size <= 128
                 and (
                     (
-                        vendor == "ascend"
-                        and input.dtype == torch.bfloat16
-                        and hidden_size == 128
-                    )
-                    or (
                         vendor == "nvidia"
                         and input.dtype != torch.bfloat16
                         and hidden_size >= 128
@@ -2022,7 +2017,12 @@ def _launch_forward(
                 # states benefit from the tensor-core dot path.
                 and (not prefer_persistent_dot or hidden_size > 64)
             )
-            use_ascend_chunked = False
+            use_ascend_chunked = (
+                vendor == "ascend"
+                and matrix_shape
+                and input.dtype == torch.bfloat16
+                and hidden_size == 128
+            )
             use_ascend_tiled = (
                 vendor == "ascend"
                 and matrix_shape
@@ -2125,7 +2125,7 @@ def _launch_forward(
                     num_warps=1,
                     num_stages=1,
                 )
-                chunk_size = 2
+                chunk_size = 8
                 block_b = 16
                 block_h = max(16, triton.next_power_of_2(hidden_size))
                 recurrent_grid = (triton.cdiv(batch_size, block_b),)
