@@ -1997,6 +1997,11 @@ def _launch_forward(
                 and hidden_size <= 128
                 and (
                     (
+                        vendor == "ascend"
+                        and input.dtype == torch.bfloat16
+                        and hidden_size == 128
+                    )
+                    or (
                         vendor == "nvidia"
                         and input.dtype != torch.bfloat16
                         and hidden_size >= 128
@@ -2017,9 +2022,7 @@ def _launch_forward(
                 # states benefit from the tensor-core dot path.
                 and (not prefer_persistent_dot or hidden_size > 64)
             )
-            use_ascend_chunked = (
-                vendor == "ascend" and matrix_shape and hidden_size <= 128
-            )
+            use_ascend_chunked = False
             use_ascend_tiled = (
                 vendor == "ascend"
                 and matrix_shape
