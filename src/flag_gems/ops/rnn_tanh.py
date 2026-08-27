@@ -321,7 +321,7 @@ def rnn_tanh_recurrent_ascend_kernel(
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
 ):
-    """Run one synchronized recurrent step with vector or matrix tiles."""
+    """Run one synchronized recurrent step using small Ascend matmul tiles."""
     m_offs = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
     n_offs = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
     k_offs = tl.arange(0, BLOCK_K)
@@ -358,13 +358,7 @@ def rnn_tanh_recurrent_ascend_kernel(
             mask=k_mask[:, None] & n_mask[None, :],
             other=0.0,
         )
-        if hidden_size <= 64:
-            products = previous.to(tl.float32)[:, :, None] * weight.to(tl.float32)[
-                None, :, :
-            ]
-            acc += tl.sum(products, axis=1)
-        else:
-            acc += tl.dot(previous.to(weight.dtype), weight)
+        acc += tl.dot(previous.to(weight.dtype), weight)
 
     row = time_index * batch_size + m_offs
     acc += tl.load(
@@ -2128,38 +2122,61 @@ def _launch_forward(
                     num_warps=1,
                     num_stages=1,
                 )
-                chunk_size = 5
+                chunk_size = 4
                 block_b = 8
                 block_h = max(16, triton.next_power_of_2(hidden_size))
                 recurrent_grid = (triton.cdiv(batch_size, block_b),)
+                direct_grid = (*recurrent_grid, 1, 1)
+                compiled_chunk = None
                 for chunk_start in range(0, seq_len, chunk_size):
                     steps = min(chunk_size, seq_len - chunk_start)
                     final_chunk = chunk_start + steps == seq_len
-                    rnn_tanh_recurrent_chunk_ascend_kernel[recurrent_grid](
-                        hx,
-                        weight_hh,
-                        input_linear,
-                        layer_output,
-                        hidden,
-                        chunk_start,
-                        *hx.stride(),
-                        *weight_hh.stride(),
-                        feature_size,
-                        state_index,
-                        seq_len,
-                        batch_size,
-                        hidden_size,
-                        direction,
-                        FIRST_CHUNK=chunk_start == 0,
-                        FINAL_CHUNK=final_chunk,
-                        STEPS=steps,
-                        BLOCK_B=block_b,
-                        BLOCK_H=block_h,
-                        num_warps=1,
-                        num_stages=1,
-                    )
+                    if compiled_chunk is not None and not final_chunk:
+                        compiled_chunk[direct_grid](
+                            hx,
+                            weight_hh,
+                            input_linear,
+                            layer_output,
+                            hidden,
+                            chunk_start,
+                            *hx.stride(),
+                            *weight_hh.stride(),
+                            feature_size,
+                            state_index,
+                        )
+                    else:
+                        compiled_kernel, _ = rnn_tanh_recurrent_chunk_ascend_kernel[
+                            recurrent_grid
+                        ](
+                            hx,
+                            weight_hh,
+                            input_linear,
+                            layer_output,
+                            hidden,
+                            chunk_start,
+                            *hx.stride(),
+                            *weight_hh.stride(),
+                            feature_size,
+                            state_index,
+                            seq_len,
+                            batch_size,
+                            hidden_size,
+                            direction,
+                            FIRST_CHUNK=chunk_start == 0,
+                            FINAL_CHUNK=final_chunk,
+                            STEPS=steps,
+                            BLOCK_B=block_b,
+                            BLOCK_H=block_h,
+                            num_warps=1,
+                            num_stages=1,
+                        )
+                        # Reuse only a full, non-initial, non-final chunk.
+                        # Its dynamic start index is neither scalar-specialized
+                        # 0 nor 1, and subsequent starts share its alignment.
+                        if chunk_start > 1 and not final_chunk:
+                            compiled_chunk = compiled_kernel
             elif use_ascend_tiled:
-                use_ascend_composed_tanh = 64 < hidden_size <= 128
+                use_ascend_composed_tanh = hidden_size <= 128
                 if not use_ascend_composed_tanh and hidden_read is None:
                     hidden_read = _empty((batch_size, hidden_size), input)
                 rows = seq_len * batch_size
@@ -2196,9 +2213,6 @@ def _launch_forward(
                     num_warps=1,
                     num_stages=1,
                 )
-                if hidden_size <= 64:
-                    block_m = 1
-                    block_n = 8
                 recurrent_grid = (
                     triton.cdiv(batch_size, block_m),
                     triton.cdiv(hidden_size, block_n),
