@@ -1955,6 +1955,12 @@ def _launch_forward(
     dropout_offset,
     prefer_persistent_dot,
 ):
+    ascend_stream = None
+    if runtime.device.vendor_name == "ascend":
+        # Resolve the caller's stream once per invocation, not once for every
+        # recurrent launch. Never retain it across calls or stream contexts.
+        driver = triton.runtime.driver.active
+        ascend_stream = driver.get_current_stream(driver.get_current_device())
     if batch_first:
         batch_size, seq_len, first_input_size = input.shape
         input_strides = (input.stride(1), input.stride(0), input.stride(2))
@@ -2132,7 +2138,7 @@ def _launch_forward(
                     steps = min(chunk_size, seq_len - chunk_start)
                     final_chunk = chunk_start + steps == seq_len
                     if compiled_chunk is not None and not final_chunk:
-                        compiled_chunk[direct_grid](
+                        compiled_chunk(
                             hx,
                             weight_hh,
                             input_linear,
@@ -2143,6 +2149,7 @@ def _launch_forward(
                             *weight_hh.stride(),
                             feature_size,
                             state_index,
+                            stream=ascend_stream,
                         )
                     else:
                         compiled_kernel, _ = rnn_tanh_recurrent_chunk_ascend_kernel[
@@ -2174,7 +2181,7 @@ def _launch_forward(
                         # Its dynamic start index is neither scalar-specialized
                         # 0 nor 1, and subsequent starts share its alignment.
                         if chunk_start > 1 and not final_chunk:
-                            compiled_chunk = compiled_kernel
+                            compiled_chunk = compiled_kernel[direct_grid]
             elif use_ascend_tiled:
                 use_ascend_composed_tanh = hidden_size <= 128
                 if not use_ascend_composed_tanh and hidden_read is None:
@@ -2238,7 +2245,7 @@ def _launch_forward(
                     for step in range(seq_len):
                         time_index = step if direction == 0 else seq_len - 1 - step
                         if compiled_middle is not None:
-                            compiled_middle[direct_grid](
+                            compiled_middle(
                                 hx,
                                 weight_hh,
                                 input_linear,
@@ -2248,6 +2255,7 @@ def _launch_forward(
                                 *weight_hh.stride(),
                                 feature_size,
                                 state_index,
+                                stream=ascend_stream,
                             )
                         else:
                             compiled_kernel, _ = rnn_tanh_recurrent_addmm_ascend_kernel[
@@ -2273,15 +2281,16 @@ def _launch_forward(
                                 num_stages=1,
                             )
                             if step == reusable_step and time_index > 1:
-                                compiled_middle = compiled_kernel
+                                compiled_middle = compiled_kernel[direct_grid]
                         final_step = step == seq_len - 1
                         if compiled_activation is not None and not final_step:
-                            compiled_activation[activation_direct_grid](
+                            compiled_activation(
                                 layer_output,
                                 hidden,
                                 time_index,
                                 feature_size,
                                 state_index,
+                                stream=ascend_stream,
                             )
                         else:
                             compiled_kernel, _ = rnn_tanh_activation_ascend_kernel[
@@ -2306,7 +2315,9 @@ def _launch_forward(
                                 and time_index > 1
                                 and not final_step
                             ):
-                                compiled_activation = compiled_kernel
+                                compiled_activation = compiled_kernel[
+                                    activation_direct_grid
+                                ]
                 else:
                     for step in range(seq_len):
                         time_index = step if direction == 0 else seq_len - 1 - step
@@ -2314,7 +2325,7 @@ def _launch_forward(
                         # Capture a non-initial launch whose time index is not the
                         # scalar-specialized 0/1, then reuse that FlagGems kernel.
                         if compiled_middle is not None and step < seq_len - 1:
-                            compiled_middle[direct_grid](
+                            compiled_middle(
                                 hx,
                                 weight_hh,
                                 bias_hh,
@@ -2328,6 +2339,7 @@ def _launch_forward(
                                 bias_hh.stride(0) if has_biases else 0,
                                 feature_size,
                                 state_index,
+                                stream=ascend_stream,
                             )
                         else:
                             compiled_kernel, _ = rnn_tanh_recurrent_ascend_kernel[
@@ -2363,7 +2375,7 @@ def _launch_forward(
                                 and time_index > 1
                                 and step < seq_len - 1
                             ):
-                                compiled_middle = compiled_kernel
+                                compiled_middle = compiled_kernel[direct_grid]
             elif use_dot:
                 block_b = min(16, triton.next_power_of_2(batch_size))
                 block_b = max(block_b, 16)

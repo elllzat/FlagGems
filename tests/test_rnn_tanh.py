@@ -143,6 +143,28 @@ def test_rnn_tanh_forward_modes(
     not _RNN_ACCELERATOR_AVAILABLE,
     reason="Triton RNN kernel requires a CUDA or NPU accelerator",
 )
+@pytest.mark.parametrize("dtype,hidden_size", [(torch.float32, 64), (torch.bfloat16, 128)])
+def test_rnn_tanh_non_default_stream(dtype, hidden_size):
+    """Cached recurrent launchers must follow each invocation's current stream."""
+    device_api = getattr(torch, flag_gems.device)
+    inp, hx, params = _make_case(17, 4, hidden_size, hidden_size, dtype)
+    reference = torch.rnn_tanh(inp, hx, params, True, 1, 0.0, False, False, False)
+    device_api.synchronize()
+    for _ in range(2):
+        stream = device_api.Stream()
+        with device_api.stream(stream):
+            with flag_gems.use_gems():
+                actual = torch.rnn_tanh(
+                    inp, hx, params, True, 1, 0.0, False, False, False
+                )
+        stream.synchronize()
+        _assert_rnn_close(actual, reference, dtype)
+
+
+@pytest.mark.skipif(
+    not _RNN_ACCELERATOR_AVAILABLE,
+    reason="Triton RNN kernel requires a CUDA or NPU accelerator",
+)
 def test_rnn_tanh_bfloat16_medium_hidden():
     """Cover the NVIDIA bf16 tensor-core selector and its Ascend peer shape."""
     dtype = torch.bfloat16
