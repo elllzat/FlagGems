@@ -157,7 +157,7 @@ def test_rnn_tanh_bfloat16_medium_hidden():
     not _RNN_ACCELERATOR_AVAILABLE,
     reason="Triton RNN kernel requires a CUDA or NPU accelerator",
 )
-@pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
+@pytest.mark.parametrize("dtype", utils.FLOAT_DTYPES)
 @pytest.mark.parametrize(
     "shape",
     [(16, 4, 32), (32, 8, 64), (64, 16, 128)],
