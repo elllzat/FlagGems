@@ -2227,7 +2227,7 @@ def _launch_forward(
                 if use_ascend_composed_tanh:
                     activation_block_n = hidden_size
                     activation_block_m = min(
-                        batch_size, max(1, 512 // activation_block_n)
+                        batch_size, max(1, 128 // activation_block_n)
                     )
                     activation_grid = (
                         triton.cdiv(batch_size, activation_block_m),
