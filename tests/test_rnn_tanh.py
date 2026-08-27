@@ -157,7 +157,7 @@ def test_rnn_tanh_bfloat16_medium_hidden():
     not _RNN_ACCELERATOR_AVAILABLE,
     reason="Triton RNN kernel requires a CUDA or NPU accelerator",
 )
-@pytest.mark.parametrize("seq_len", [17, 20])
+@pytest.mark.parametrize("seq_len", [17, 18, 20])
 def test_rnn_tanh_bfloat16_long_bidirectional(seq_len):
     """Cover full/remainder recurrent chunks across both directions and layers."""
     dtype = torch.bfloat16

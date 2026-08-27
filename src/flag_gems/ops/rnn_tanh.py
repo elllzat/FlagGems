@@ -2122,7 +2122,7 @@ def _launch_forward(
                     num_warps=1,
                     num_stages=1,
                 )
-                chunk_size = 4
+                chunk_size = 3
                 block_b = 8
                 block_h = max(16, triton.next_power_of_2(hidden_size))
                 recurrent_grid = (triton.cdiv(batch_size, block_b),)
@@ -2227,7 +2227,7 @@ def _launch_forward(
                 if use_ascend_composed_tanh:
                     activation_block_n = hidden_size
                     activation_block_m = min(
-                        batch_size, max(1, 128 // activation_block_n)
+                        batch_size, max(1, 512 // activation_block_n)
                     )
                     activation_grid = (
                         triton.cdiv(batch_size, activation_block_m),
