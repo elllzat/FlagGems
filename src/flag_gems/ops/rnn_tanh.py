@@ -321,7 +321,7 @@ def rnn_tanh_recurrent_ascend_kernel(
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
 ):
-    """Run one synchronized recurrent step using small Ascend matmul tiles."""
+    """Run one synchronized recurrent step with vector or matrix tiles."""
     m_offs = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
     n_offs = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
     k_offs = tl.arange(0, BLOCK_K)
@@ -358,7 +358,13 @@ def rnn_tanh_recurrent_ascend_kernel(
             mask=k_mask[:, None] & n_mask[None, :],
             other=0.0,
         )
-        acc += tl.dot(previous.to(weight.dtype), weight)
+        if hidden_size <= 64:
+            products = previous.to(tl.float32)[:, :, None] * weight.to(tl.float32)[
+                None, :, :
+            ]
+            acc += tl.sum(products, axis=1)
+        else:
+            acc += tl.dot(previous.to(weight.dtype), weight)
 
     row = time_index * batch_size + m_offs
     acc += tl.load(
@@ -2153,7 +2159,7 @@ def _launch_forward(
                         num_stages=1,
                     )
             elif use_ascend_tiled:
-                use_ascend_composed_tanh = hidden_size <= 128
+                use_ascend_composed_tanh = 64 < hidden_size <= 128
                 if not use_ascend_composed_tanh and hidden_read is None:
                     hidden_read = _empty((batch_size, hidden_size), input)
                 rows = seq_len * batch_size
@@ -2190,9 +2196,9 @@ def _launch_forward(
                     num_warps=1,
                     num_stages=1,
                 )
-                if hidden_size == 128:
-                    block_m = 8
-                    block_n = 32
+                if hidden_size <= 64:
+                    block_m = 1
+                    block_n = 8
                 recurrent_grid = (
                     triton.cdiv(batch_size, block_m),
                     triton.cdiv(hidden_size, block_n),
