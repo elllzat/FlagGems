@@ -1372,7 +1372,10 @@ def rnn_tanh_dbias_kernel(
 ):
     h_offs = tl.program_id(0) * BLOCK_H + tl.arange(0, BLOCK_H)
     r_offs = tl.arange(0, BLOCK_R)
-    acc = tl.zeros([BLOCK_H], dtype=tl.float32)
+    # Accumulate row tiles before reducing. Older Triton backends can assert
+    # when a loop containing a reduction feeds both independent bias stores.
+    # This also performs the cross-row reduction only once per program.
+    partial = tl.zeros([BLOCK_R, BLOCK_H], dtype=tl.float32)
     for r_start in range(0, rows, BLOCK_R):
         rs = r_start + r_offs
         values = tl.load(
@@ -1380,7 +1383,8 @@ def rnn_tanh_dbias_kernel(
             mask=(rs[:, None] < rows) & (h_offs[None, :] < hidden_size),
             other=0.0,
         ).to(tl.float32)
-        acc += tl.sum(values, axis=0)
+        partial += values
+    acc = tl.sum(partial, axis=0)
     mask = h_offs < hidden_size
     tl.store(grad_bias_ih_ptr + h_offs, acc, mask=mask)
     tl.store(grad_bias_hh_ptr + h_offs, acc, mask=mask)

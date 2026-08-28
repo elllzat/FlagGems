@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from contextlib import nullcontext
 from unittest import mock
 
 import pytest
@@ -143,7 +144,9 @@ def test_rnn_tanh_forward_modes(
     not _RNN_ACCELERATOR_AVAILABLE,
     reason="Triton RNN kernel requires a CUDA or NPU accelerator",
 )
-@pytest.mark.parametrize("dtype,hidden_size", [(torch.float32, 64), (torch.bfloat16, 128)])
+@pytest.mark.parametrize(
+    "dtype,hidden_size", [(torch.float32, 64), (torch.bfloat16, 128)]
+)
 def test_rnn_tanh_non_default_stream(dtype, hidden_size):
     """Cached recurrent launchers must follow each invocation's current stream."""
     device_api = getattr(torch, flag_gems.device)
@@ -255,6 +258,38 @@ def test_rnn_tanh_backward():
     not _RNN_ACCELERATOR_AVAILABLE,
     reason="Triton RNN kernel requires a CUDA or NPU accelerator",
 )
+@pytest.mark.parametrize("dtype", utils.FLOAT_DTYPES)
+@pytest.mark.parametrize("rows,hidden_size", [(8, 16), (65, 37), (129, 64)])
+def test_rnn_tanh_dbias_reduction(dtype, rows, hidden_size):
+    """Cover masked tiles, multiple row tiles, and independent bias outputs."""
+    import triton
+
+    from flag_gems.ops.rnn_tanh import rnn_tanh_dbias_kernel
+
+    dpre = torch.randn(rows, hidden_size, dtype=dtype, device=flag_gems.device)
+    grad_bias_ih = torch.empty(hidden_size, dtype=dtype, device=flag_gems.device)
+    grad_bias_hh = torch.empty_like(grad_bias_ih)
+    expected = dpre.float().sum(dim=0).to(dtype)
+    rnn_tanh_dbias_kernel[(triton.cdiv(hidden_size, 32),)](
+        dpre,
+        grad_bias_ih,
+        grad_bias_hh,
+        rows,
+        hidden_size,
+        BLOCK_H=32,
+        BLOCK_R=32,
+    )
+    utils.gems_assert_close(grad_bias_ih, expected, dtype, atol=1e-4)
+    utils.gems_assert_close(grad_bias_hh, expected, dtype, atol=1e-4)
+    assert grad_bias_ih.data_ptr() != grad_bias_hh.data_ptr()
+    grad_bias_ih.zero_()
+    utils.gems_assert_close(grad_bias_hh, expected, dtype, atol=1e-4)
+
+
+@pytest.mark.skipif(
+    not _RNN_ACCELERATOR_AVAILABLE,
+    reason="Triton RNN kernel requires a CUDA or NPU accelerator",
+)
 def test_rnn_tanh_launcher_has_no_torch_composition():
     """Guard the pure-Triton requirement against accidental Torch fallback."""
     from flag_gems.ops.rnn_tanh import rnn_tanh as gems_rnn_tanh
@@ -295,7 +330,16 @@ def test_rnn_tanh_dropout_one():
     from flag_gems.ops.rnn_tanh import rnn_tanh as gems_rnn_tanh
 
     inp, hx, params = _make_case(5, 3, 16, 16, torch.float32, num_layers=2)
-    reference = torch.rnn_tanh(inp, hx, params, True, 2, 1.0, True, False, False)
+    # Hygon's Torch 2.4.1 MIOpen RNN path ignores dropout. Use the generic
+    # reference only for this dropout test; restore the backend setting before
+    # running Gems and leave all performance baselines unchanged.
+    reference_context = (
+        torch.backends.cudnn.flags(enabled=False)
+        if flag_gems.vendor_name == "hygon"
+        else nullcontext()
+    )
+    with reference_context:
+        reference = torch.rnn_tanh(inp, hx, params, True, 2, 1.0, True, False, False)
     actual = gems_rnn_tanh(inp, hx, params, True, 2, 1.0, True, False, False)
     _assert_rnn_close(actual, reference, torch.float32)
 
