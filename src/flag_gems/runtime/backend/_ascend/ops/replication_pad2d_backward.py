@@ -727,12 +727,11 @@ def _replication_pad2d_backward_impl(
             # Large: splitting the op in two lets both launches use the biggest
             # 2D tile UB allows, which is what saturates DMA here.
             #
-            # R * WN tiles keep the 2D copies far below the UB cap.  The budget
-            # is in BYTES, and 16384 elements was tuned for 2-byte dtypes, so
-            # scale the element cap by element size: fp32 must use half the rows
-            # of fp16/bf16 or the [R x W] tile overflows the 192KB UB and fails
-            # to compile.
-            r_wide = max(1, min(H, (16384 * 2 // itemsize) // W))
+            # Keep the aligned tile at or below 8192 elements. CANN 9.0 enables
+            # multi-buffering for this kernel, so the former 16384-element
+            # fp16/bf16 tile can exceed the 192KB UB after edge-fold temporaries
+            # are allocated.
+            r_wide = max(1, min(H, 8192 // W))
             grid = (n_images * triton.cdiv(H, r_wide),)
             _backward_wide_k1[grid](
                 grad_output,
