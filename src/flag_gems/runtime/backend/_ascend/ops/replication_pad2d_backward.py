@@ -17,11 +17,10 @@ DEFAULT_R = 16
 def _backward_rows_kernel(
     gop,
     gip,
-    CO,
-    OH,
-    OW,
-    H,
-    W,
+    OH: tl.constexpr,
+    OW: tl.constexpr,
+    H: tl.constexpr,
+    W: tl.constexpr,
     PL: tl.constexpr,
     PR: tl.constexpr,
     PT: tl.constexpr,
@@ -35,7 +34,7 @@ def _backward_rows_kernel(
 ):
     pid = ext.program_id(0)
     n_row_blocks = (H + R - 1) // R
-    nc = CO + pid // n_row_blocks
+    nc = pid // n_row_blocks
     j0 = (pid % n_row_blocks) * R
     c_out = nc * OH * OW
     c_in = nc * H * W
@@ -213,11 +212,10 @@ def _backward_rows_kernel(
 def _backward_wide_k1(
     gop,
     gip,
-    CO,
-    OH,
-    OW,
-    H,
-    W,
+    OH: tl.constexpr,
+    OW: tl.constexpr,
+    H: tl.constexpr,
+    W: tl.constexpr,
     PL: tl.constexpr,
     PR: tl.constexpr,
     PT: tl.constexpr,
@@ -226,7 +224,7 @@ def _backward_wide_k1(
 ):
     pid = ext.program_id(0)
     nrb = (H + R - 1) // R
-    nc = CO + pid // nrb
+    nc = pid // nrb
     j0 = (pid % nrb) * R
     c_out = nc * OH * OW
     c_in = nc * H * W
@@ -296,11 +294,10 @@ def _backward_wide_k1(
 def _backward_wide_k2(
     gop,
     gip,
-    CO,
-    OH,
-    OW,
-    H,
-    W,
+    OH: tl.constexpr,
+    OW: tl.constexpr,
+    H: tl.constexpr,
+    W: tl.constexpr,
     PL: tl.constexpr,
     PR: tl.constexpr,
     PT: tl.constexpr,
@@ -312,7 +309,7 @@ def _backward_wide_k2(
     CNH: tl.constexpr,
 ):
     pid = ext.program_id(0)
-    nc = CO + pid
+    nc = pid
     c_out = nc * OH * OW
     c_in = nc * H * W
     iw = tl.arange(0, WN)
@@ -415,11 +412,10 @@ def _backward_wide_k2(
 def _backward_wide_merged(
     gop,
     gip,
-    CO,
-    OH,
-    OW,
-    H,
-    W,
+    OH: tl.constexpr,
+    OW: tl.constexpr,
+    H: tl.constexpr,
+    W: tl.constexpr,
     PL: tl.constexpr,
     PR: tl.constexpr,
     PT: tl.constexpr,
@@ -432,7 +428,7 @@ def _backward_wide_merged(
 ):
     pid = ext.program_id(0)
     nrb = (H + R - 1) // R
-    nc = CO + pid // nrb
+    nc = pid // nrb
     j0 = (pid % nrb) * R
     c_out = nc * OH * OW
     c_in = nc * H * W
@@ -711,7 +707,6 @@ def _replication_pad2d_backward_impl(
             _backward_wide_merged[grid](
                 grad_output,
                 out,
-                0,
                 OH,
                 OW,
                 H,
@@ -742,7 +737,6 @@ def _replication_pad2d_backward_impl(
             _backward_wide_k1[grid](
                 grad_output,
                 out,
-                0,
                 OH,
                 OW,
                 H,
@@ -762,7 +756,6 @@ def _replication_pad2d_backward_impl(
                 _backward_wide_k2[(n_images,)](
                     grad_output,
                     out,
-                    0,
                     OH,
                     OW,
                     H,
@@ -786,7 +779,6 @@ def _replication_pad2d_backward_impl(
     _backward_rows_kernel[grid](
         grad_output,
         out,
-        0,
         OH,
         OW,
         H,

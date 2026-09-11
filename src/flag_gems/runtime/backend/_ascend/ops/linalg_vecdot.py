@@ -18,25 +18,20 @@ import torch
 import triton
 import triton.language as tl
 
-from flag_gems.runtime import torch_device_fn
-from flag_gems.utils import libentry
-from flag_gems.utils import triton_lang_extension as ext
-
 logger = logging.getLogger(__name__)
 
 
-@libentry()
 @triton.jit
 def _vecdot_kernel(
     x_ptr,
     y_ptr,
     out_ptr,
-    n_batch,
+    n_batch: tl.constexpr,
     vdim: tl.constexpr,
     BLOCK_ROWS: tl.constexpr,
     BLOCK_COLS: tl.constexpr,
 ):
-    rows = ext.program_id(0) * BLOCK_ROWS + tl.arange(0, BLOCK_ROWS)
+    rows = tl.program_id(0) * BLOCK_ROWS + tl.arange(0, BLOCK_ROWS)
     row_mask = rows < n_batch
     acc = tl.zeros((BLOCK_ROWS, BLOCK_COLS), dtype=tl.float32)
 
@@ -63,16 +58,15 @@ def _launch_vecdot(x, y, out):
     n_batch = x.numel() // vdim
     block_rows, block_cols = _block_config(n_batch, vdim)
     grid = (triton.cdiv(n_batch, block_rows),)
-    with torch_device_fn.device(x.device):
-        _vecdot_kernel[grid](
-            x,
-            y,
-            out,
-            n_batch,
-            vdim,
-            BLOCK_ROWS=block_rows,
-            BLOCK_COLS=block_cols,
-        )
+    _vecdot_kernel[grid](
+        x,
+        y,
+        out,
+        n_batch,
+        vdim,
+        BLOCK_ROWS=block_rows,
+        BLOCK_COLS=block_cols,
+    )
 
 
 def _prepare_inputs(x, y, dim):
