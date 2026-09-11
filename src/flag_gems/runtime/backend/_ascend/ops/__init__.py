@@ -79,6 +79,7 @@ from .linalg_solve_triangular import (
     linalg_solve_triangular,
     linalg_solve_triangular_out,
 )
+from .linalg_vecdot import linalg_vecdot, linalg_vecdot_out
 from .linspace import linspace
 from .log_normal import log_normal
 from .log_sigmoid_backward import log_sigmoid_backward, log_sigmoid_backward_out
@@ -228,6 +229,8 @@ __all__ = [
     "linalg_qr_out",
     "linalg_solve_triangular",
     "linalg_solve_triangular_out",
+    "linalg_vecdot",
+    "linalg_vecdot_out",
     "linspace",
     "log_normal",
     "log_sigmoid_backward",
