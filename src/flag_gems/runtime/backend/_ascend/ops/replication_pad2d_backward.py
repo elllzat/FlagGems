@@ -8,9 +8,9 @@ from flag_gems.utils import triton_lang_extension as ext
 
 logger = logging.getLogger(__name__)
 
-# rows owned by one program.  Only the accumulator row-vectors are live at a
-# time, so this does NOT cost UB: every buffer is 1xWN regardless of R.
-DEFAULT_R = 16
+# Rows owned by one program. Only the accumulator row-vectors are live at a
+# time, so this does not cost UB: every buffer is 1xWN regardless of R.
+TARGET_ROW_PROGRAMS = 128
 
 
 @triton.jit
@@ -652,10 +652,11 @@ def _replication_pad2d_backward_impl(
 
     itemsize = grad_output.element_size()
 
-    # The launch plan depends only on the input geometry -- W decides whether a
-    # row is a plain DMA block, H decides how many rows one program owns -- so
-    # the cache key is just (H, W) and the hot path pays one 2-tuple hash.
-    plan = _plan_cache.get((H, W))
+    # W decides whether a row is a plain DMA block. The fallback row count also
+    # uses the number of images so small-channel tensors expose enough parallel
+    # work while high-channel tensors avoid thousands of tiny programs.
+    plan_key = (n_images, H, W)
+    plan = _plan_cache.get(plan_key)
     if plan is None:
         # WIDTH: the widest row is a plain DMA block when W equals its padded
         # arange width (W a power of two); otherwise lanes past W are masked.
@@ -665,9 +666,12 @@ def _replication_pad2d_backward_impl(
         else:
             w_width = triton.next_power_of_2(W)
             full = False
-        rows_per_block = max(1, min(H, max(DEFAULT_R, (H + 255) // 256)))
+        rows_per_block = max(
+            1,
+            min(H, (n_images * H + TARGET_ROW_PROGRAMS - 1) // TARGET_ROW_PROGRAMS),
+        )
         plan = (w_width, full, rows_per_block)
-        _plan_cache[(H, W)] = plan
+        _plan_cache[plan_key] = plan
     w_width, full, rows_per_block = plan
 
     # 2D-tile paths: only for the shapes they are designed and tested for -- a

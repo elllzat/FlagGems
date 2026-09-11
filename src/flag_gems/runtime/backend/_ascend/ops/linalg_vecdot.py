@@ -113,12 +113,7 @@ def linalg_vecdot_out(x, y, dim=-1, out=None):
     logger.debug("GEMS_ASCEND LINALG_VECDOT_OUT")
     if out is None:
         return linalg_vecdot(x, y, dim)
-    if (
-        dim == -1
-        and x.is_contiguous()
-        and y.is_contiguous()
-        and out.is_contiguous()
-    ):
+    if dim == -1 and x.is_contiguous() and y.is_contiguous() and out.is_contiguous():
         if x.shape != y.shape:
             raise ValueError("Input shapes must match")
         if out.shape == x.shape[:-1]:
