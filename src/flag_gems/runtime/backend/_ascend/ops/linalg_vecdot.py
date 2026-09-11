@@ -26,46 +26,31 @@ def _vecdot_kernel(
     x_ptr,
     y_ptr,
     out_ptr,
-    n_batch: tl.constexpr,
-    vdim: tl.constexpr,
-    BLOCK_ROWS: tl.constexpr,
-    BLOCK_COLS: tl.constexpr,
+    vdim,
+    BLOCK_SIZE: tl.constexpr,
 ):
-    rows = tl.program_id(0) * BLOCK_ROWS + tl.arange(0, BLOCK_ROWS)
-    row_mask = rows < n_batch
-    acc = tl.zeros((BLOCK_ROWS, BLOCK_COLS), dtype=tl.float32)
-
-    for start in range(0, vdim, BLOCK_COLS):
-        cols = start + tl.arange(0, BLOCK_COLS)
-        mask = row_mask[:, None] & (cols[None, :] < vdim)
-        offsets = rows[:, None] * vdim + cols[None, :]
-        x = tl.load(x_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
-        y = tl.load(y_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+    row = tl.program_id(0)
+    base = row * vdim
+    acc = tl.zeros((BLOCK_SIZE,), dtype=tl.float32)
+    for start in range(0, vdim, BLOCK_SIZE):
+        cols = start + tl.arange(0, BLOCK_SIZE)
+        mask = cols < vdim
+        x = tl.load(x_ptr + base + cols, mask=mask, other=0.0).to(tl.float32)
+        y = tl.load(y_ptr + base + cols, mask=mask, other=0.0).to(tl.float32)
         acc += x * y
-
-    tl.store(out_ptr + rows, tl.sum(acc, axis=1), mask=row_mask)
-
-
-def _block_config(n_batch, vdim):
-    block_cols = min(1024, max(32, triton.next_power_of_2(vdim)))
-    max_rows = max(1, 8192 // block_cols)
-    block_rows = min(max_rows, triton.next_power_of_2(n_batch))
-    return block_rows, block_cols
+    tl.store(out_ptr + row, tl.sum(acc, axis=0))
 
 
 def _launch_vecdot(x, y, out):
     vdim = x.shape[-1]
     n_batch = x.numel() // vdim
-    block_rows, block_cols = _block_config(n_batch, vdim)
-    grid = (triton.cdiv(n_batch, block_rows),)
-    _vecdot_kernel[grid](
+    block_size = min(1024, max(32, triton.next_power_of_2(vdim)))
+    _vecdot_kernel[(n_batch,)](
         x,
         y,
         out,
-        n_batch,
         vdim,
-        BLOCK_ROWS=block_rows,
-        BLOCK_COLS=block_cols,
+        BLOCK_SIZE=block_size,
     )
 
 
@@ -112,11 +97,31 @@ def _linalg_vecdot_impl(x, y, dim, out=None):
 
 def linalg_vecdot(x, y, dim=-1):
     logger.debug("GEMS_ASCEND LINALG_VECDOT")
+    if dim == -1 and x.is_contiguous() and y.is_contiguous():
+        if x.shape != y.shape:
+            raise ValueError("Input shapes must match")
+        out_shape = x.shape[:-1]
+        out = torch.empty(
+            out_shape if out_shape else (), dtype=x.dtype, device=x.device
+        )
+        _launch_vecdot(x, y, out)
+        return out
     return _linalg_vecdot_impl(x, y, dim)
 
 
 def linalg_vecdot_out(x, y, dim=-1, out=None):
     logger.debug("GEMS_ASCEND LINALG_VECDOT_OUT")
     if out is None:
-        return _linalg_vecdot_impl(x, y, dim)
+        return linalg_vecdot(x, y, dim)
+    if (
+        dim == -1
+        and x.is_contiguous()
+        and y.is_contiguous()
+        and out.is_contiguous()
+    ):
+        if x.shape != y.shape:
+            raise ValueError("Input shapes must match")
+        if out.shape == x.shape[:-1]:
+            _launch_vecdot(x, y, out)
+            return out
     return _linalg_vecdot_impl(x, y, dim, out=out)
