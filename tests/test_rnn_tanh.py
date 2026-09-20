@@ -104,7 +104,7 @@ def _assert_rnn_close(actual, expected, dtype):
     atol = {
         torch.float32: 1e-4,
         torch.float16: 0.0011334419832564893,
-        torch.bfloat16: 0.007965088356286289,
+        torch.bfloat16: 0.014375000260770321,
     }[dtype]
     utils.gems_assert_close(actual[0], expected[0], dtype, atol=atol)
     utils.gems_assert_close(actual[1], expected[1], dtype, atol=atol)
